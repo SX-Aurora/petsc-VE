@@ -1598,7 +1598,13 @@ PetscErrorCode MatSetValuesStencil(Mat mat,PetscInt m,const MatStencil idxm[],Pe
     jdxn[i] = tmp;
   }
   ierr = MatSetValuesLocal(mat,m,jdxm,n,jdxn,v,addv);CHKERRQ(ierr);
+#ifdef __ve__
+  if (jdxm == bufm && jdxn == bufn) {
+    ierr = PetscFree2(bufm,bufn);CHKERRQ(ierr);
+  }
+#else
   ierr = PetscFree2(bufm,bufn);CHKERRQ(ierr);
+#endif
   PetscFunctionReturn(0);
 }
 
@@ -2251,7 +2257,13 @@ PetscErrorCode MatSetValuesLocal(Mat mat,PetscInt nrow,const PetscInt irow[],Pet
     ierr = ISLocalToGlobalMappingApply(mat->rmap->mapping,nrow,irow,irowm);CHKERRQ(ierr);
     ierr = ISLocalToGlobalMappingApply(mat->cmap->mapping,ncol,icol,icolm);CHKERRQ(ierr);
     ierr = MatSetValues(mat,nrow,irowm,ncol,icolm,y,addv);CHKERRQ(ierr);
+#ifdef __ve__
+    if (irowm == bufr && icolm == bufc) {
+      ierr = PetscFree2(bufr,bufc);CHKERRQ(ierr);
+    }
+#else
     ierr = PetscFree2(bufr,bufc);CHKERRQ(ierr);
+#endif
   }
   ierr = PetscLogEventEnd(MAT_SetValues,mat,0,0,0);CHKERRQ(ierr);
   PetscFunctionReturn(0);

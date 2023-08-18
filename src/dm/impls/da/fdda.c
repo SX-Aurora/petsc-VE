@@ -1,4 +1,19 @@
 
+#ifdef __ve__
+#include <../src/mat/impls/aij/seq/aij.h>
+#include <../src/mat/impls/aij/mpi/mpiaij.h>
+#include <petsc/private/matimpl.h>        /*I "petscmat.h" I*/
+#include <petsc/private/isimpl.h>
+#include <petsc/private/vecimpl.h>
+//#define VE_SETERRQ
+#ifndef BUF_SIZE
+#define BUF_SIZE 8192*4
+#endif
+#ifndef MAX_CNT
+#define MAX_CNT 5
+#endif
+#endif
+
 #include <petsc/private/dmdaimpl.h> /*I      "petscdmda.h"     I*/
 #include <petscmat.h>
 
@@ -1121,6 +1136,83 @@ PetscErrorCode DMCreateMatrix_DA_3d_MPISELL(DM da,Mat J)
   PetscFunctionReturn(0);
 }
 
+#ifdef __ve__
+#define MatSetValues_SeqAIJ_A_Private(row,col,value,addv,orow,ocol)     \
+{ \
+    if (col <= lastcol1)  low1 = 0;     \
+    else                 high1 = nrow1; \
+    lastcol1 = col;\
+    while (high1-low1 > 5) { \
+      t = (low1+high1)/2; \
+      if (rp1[t] > col) high1 = t; \
+      else              low1  = t; \
+    } \
+      for (_i=low1; _i<high1; _i++) { \
+        if (rp1[_i] > col) break; \
+        if (rp1[_i] == col) { \
+          if (addv == ADD_VALUES) { \
+            ap1[_i] += value;   \
+            /* Not sure LogFlops will slow dow the code or not */ \
+            (void)PetscLogFlops(1.0);   \
+           } \
+          else                    ap1[_i] = value; \
+          inserted = PETSC_TRUE; \
+          goto a_noinsert; \
+        } \
+      }  \
+      if (value == 0.0 && ignorezeroentries && row != col) {low1 = 0; high1 = nrow1;goto a_noinsert;} \
+      if (nonew == 1) {low1 = 0; high1 = nrow1; goto a_noinsert;}                \
+      if (nonew == -1) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Inserting a new nonzero at global row/column (%D, %D) into matrix", orow, ocol); \
+      MatSeqXAIJReallocateAIJ(A,am,1,nrow1,row,col,rmax1,aa,ai,aj,rp1,ap1,aimax,nonew,MatScalar); \
+      N = nrow1++ - 1; a->nz++; high1++; \
+      /* shift up all the later entries in this row */ \
+      ierr = PetscArraymove(rp1+_i+1,rp1+_i,N-_i+1);CHKERRQ(ierr);\
+      ierr = PetscArraymove(ap1+_i+1,ap1+_i,N-_i+1);CHKERRQ(ierr);\
+      rp1[_i] = col;  \
+      ap1[_i] = value;  \
+      A->nonzerostate++;\
+      a_noinsert: ; \
+      ailen[row] = nrow1; \
+}
+
+#define MatSetValues_SeqAIJ_B_Private(row,col,value,addv,orow,ocol) \
+  { \
+    if (col <= lastcol2) low2 = 0;                        \
+    else high2 = nrow2;                                   \
+    lastcol2 = col;                                       \
+    while (high2-low2 > 5) {                              \
+      t = (low2+high2)/2;                                 \
+      if (rp2[t] > col) high2 = t;                        \
+      else             low2  = t;                         \
+    }                                                     \
+    for (_i=low2; _i<high2; _i++) {                       \
+      if (rp2[_i] > col) break;                           \
+      if (rp2[_i] == col) {                               \
+        if (addv == ADD_VALUES) {                         \
+          ap2[_i] += value;                               \
+          (void)PetscLogFlops(1.0);                       \
+        }                                                 \
+        else                    ap2[_i] = value;          \
+        inserted = PETSC_TRUE;                            \
+        goto b_noinsert;                                  \
+      }                                                   \
+    }                                                     \
+    if (value == 0.0 && ignorezeroentries) {low2 = 0; high2 = nrow2; goto b_noinsert;} \
+    if (nonew == 1) {low2 = 0; high2 = nrow2; goto b_noinsert;}                        \
+    if (nonew == -1) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Inserting a new nonzero at global row/column (%D, %D) into matrix", orow, ocol); \
+    MatSeqXAIJReallocateAIJ(B,bm,1,nrow2,row,col,rmax2,ba,bi,bj,rp2,ap2,bimax,nonew,MatScalar); \
+    N = nrow2++ - 1; b->nz++; high2++;                    \
+    /* shift up all the later entries in this row */      \
+    ierr = PetscArraymove(rp2+_i+1,rp2+_i,N-_i+1);CHKERRQ(ierr);\
+    ierr = PetscArraymove(ap2+_i+1,ap2+_i,N-_i+1);CHKERRQ(ierr);\
+    rp2[_i] = col;                                        \
+    ap2[_i] = value;                                      \
+    B->nonzerostate++;                                    \
+    b_noinsert: ;                                         \
+    bilen[row] = nrow2;                                   \
+  }
+#endif
+
 PetscErrorCode DMCreateMatrix_DA_2d_MPIAIJ(DM da,Mat J,PetscBool isIS)
 {
   PetscErrorCode         ierr;
@@ -1153,12 +1245,406 @@ PetscErrorCode DMCreateMatrix_DA_2d_MPIAIJ(DM da,Mat J,PetscBool isIS)
   ierr = DMDAGetGhostCorners(da,&gxs,&gys,NULL,&gnx,&gny,NULL);CHKERRQ(ierr);
   ierr = PetscObjectGetComm((PetscObject)da,&comm);CHKERRQ(ierr);
 
+#ifdef __ve__
+  ierr = PetscMalloc2(nc*ny,&rows,col*col*nc*nc*ny,&cols);CHKERRQ(ierr);
+#else
   ierr = PetscMalloc2(nc,&rows,col*col*nc*nc,&cols);CHKERRQ(ierr);
+#endif
   ierr = DMGetLocalToGlobalMapping(da,&ltog);CHKERRQ(ierr);
 
   ierr = MatSetBlockSize(J,nc);CHKERRQ(ierr);
   /* determine the matrix preallocation information */
   ierr = MatPreallocateInitialize(comm,nc*nx*ny,nc*nx*ny,dnz,onz);CHKERRQ(ierr);
+#ifdef __ve__
+ if (!removedups) {
+  for (i=xs; i<xs+nx; i++) {
+
+    pstart = (bx == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-i));
+    pend   = (bx == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,m-i-1));
+
+#pragma _NEC ivdep
+    for (j=ys; j<ys+ny; j++) {
+      slot = i - gxs + gnx*(j - gys);
+
+      lstart = (by == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-j));
+      lend   = (by == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,n-j-1));
+
+      cnt = 0;
+      k=0;
+      if (k<nc) { // max(nc)=1
+        l=lstart;
+        if (l<lend+1) { // max(lend-lstart+1)=1
+          p=pstart;
+          if (p<pend+1) { // max(pend-pstart+1)=1
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = k + nc*(slot + gnx*l + p);
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=2
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = k + nc*(slot + gnx*l + p);
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=3
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = k + nc*(slot + gnx*l + p);
+            }
+            p++;
+          }
+          l++;
+        }
+        if (l<lend+1) { // max(lend-lstart+1)=2
+          p=pstart;
+          if (p<pend+1) { // max(pend-pstart+1)=1
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = k + nc*(slot + gnx*l + p);
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=2
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = k + nc*(slot + gnx*l + p);
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=3
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = k + nc*(slot + gnx*l + p);
+            }
+            p++;
+          }
+          l++;
+        }
+        if (l<lend+1) { // max(lend-lstart+1)=3
+          p=pstart;
+          if (p<pend+1) { // max(pend-pstart+1)=1
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = k + nc*(slot + gnx*l + p);
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=2
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = k + nc*(slot + gnx*l + p);
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=3
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = k + nc*(slot + gnx*l + p);
+            }
+            p++;
+          }
+          l++;
+        }
+        rows[k*ny+j-ys] = k + nc*(slot);
+        k++;
+      }
+      //ierr = MatPreallocateSetLocal(ltog,nc,rows,ltog,cnt,cols,dnz,onz);CHKERRQ(ierr);
+      //#define MatPreallocateSetLocal(rmap,nrows,rows,cmap,ncols,cols,dnz,onz) 0; \
+      //do {\
+      //  PetscInt __l;\
+      //  _4_ierr = ISLocalToGlobalMappingApply(rmap,nrows,rows,rows);CHKERRQ(_4_ierr);\
+      //  _4_ierr = ISLocalToGlobalMappingApply(cmap,ncols,cols,cols);CHKERRQ(_4_ierr);\
+      //  for (__l=0;__l<nrows;__l++) {\
+      //    _4_ierr = MatPreallocateSet((rows)[__l],ncols,cols,dnz,onz);CHKERRQ(_4_ierr);\
+      //  }\
+      // } while (0)
+      //-- enter --
+      {
+        ISLocalToGlobalMapping rmap, cmap;
+        PetscInt nrows, ncols;
+        rmap = ltog;
+        nrows = nc;
+        cmap = ltog;
+        ncols = cnt;
+        //do {
+          PetscInt __l;
+          //_4_ierr = ISLocalToGlobalMappingApply(rmap,nrows,rows,rows);CHKERRQ(_4_ierr);
+          //PetscErrorCode ISLocalToGlobalMappingApply(ISLocalToGlobalMapping mapping,PetscInt N,const PetscInt in[],PetscInt out[])
+          //-- enter --
+          {
+            PetscInt i,bs,Nmax;
+            ISLocalToGlobalMapping mapping;
+            PetscInt N;
+            const PetscInt *in;
+            PetscInt *out;
+
+            mapping = rmap;
+            N = nrows;
+            in = rows;
+            out = rows;
+
+            PetscFunctionBegin;
+            PetscValidHeaderSpecific(mapping,IS_LTOGM_CLASSID,1);
+            bs   = mapping->bs;
+            Nmax = bs*mapping->n;
+            if (bs == 1) {
+              const PetscInt *idx = mapping->indices;
+              i=0;
+              if (i<N) { // max(N)=1
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_SETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                }
+                i++;
+              }
+            } else {
+              const PetscInt *idx = mapping->indices;
+              i=0;
+              if (i<N) { // max(N)=1
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_SETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                }
+                i++;
+              }
+            }
+            _4_ierr = 0;
+            //PetscFunctionReturn(0);
+          }
+          //-- exit --
+          //_4_ierr = ISLocalToGlobalMappingApply(cmap,ncols,cols,cols);CHKERRQ(_4_ierr);
+          //PetscErrorCode ISLocalToGlobalMappingApply(ISLocalToGlobalMapping mapping,PetscInt N,const PetscInt in[],PetscInt out[])
+          //-- enter --
+          {
+            PetscInt i,bs,Nmax;
+            ISLocalToGlobalMapping mapping;
+            PetscInt N;
+            const PetscInt *in;
+            PetscInt *out;
+
+            mapping = cmap;
+            N = ncols;
+            in = cols;
+            out = cols;
+
+            PetscFunctionBegin;
+            PetscValidHeaderSpecific(mapping,IS_LTOGM_CLASSID,1);
+            bs   = mapping->bs;
+            Nmax = bs*mapping->n;
+            if (bs == 1) {
+              const PetscInt *idx = mapping->indices;
+              i=0;
+              if (i<N) { // max(N)=1
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_SETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                }
+                i++;
+              }
+              if (i<N) { // max(N)=2
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_SETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                }
+                i++;
+              }
+              if (i<N) { // max(N)=3
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_SETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                }
+                i++;
+              }
+              if (i<N) { // max(N)=4
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_SETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                }
+                i++;
+              }
+              if (i<N) { // max(N)=5
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_NOSETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                }
+                i++;
+              }
+            } else {
+              const PetscInt *idx = mapping->indices;
+              i=0;
+              if (i<N) { // max(N)=1
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_NOSETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                }
+                i++;
+              }
+              if (i<N) { // max(N)=2
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_NOSETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                }
+                i++;
+              }
+              if (i<N) { // max(N)=3
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_NOSETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                }
+                i++;
+              }
+              if (i<N) { // max(N)=4
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_NOSETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                }
+                i++;
+              }
+              if (i<N) { // max(N)=5
+                if (in[i*ny+j-ys] < 0) {
+                  out[i*ny+j-ys] = in[i*ny+j-ys];
+                } else {
+#ifdef VE_NOSETERRQ
+                  if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                  out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                }
+                i++;
+              }
+            }
+            _4_ierr = 0;
+            //PetscFunctionReturn(0);
+          }
+          //-- exit --
+          //for (__l=0;__l<nrows;__l++) {
+          //  _4_ierr = MatPreallocateSet((rows)[__l],ncols,cols,dnz,onz);CHKERRQ(_4_ierr);
+          //}
+          //#define MatPreallocateSet(row,nc,cols,dnz,onz) 0;\
+          //do { PetscInt __i; \
+          //  if (row < __rstart) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Trying to set preallocation for row %D less than first local row %D",row,__rstart);\
+          //  if (row >= __rstart+__nrows) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Trying to set preallocation for row %D greater than last local row %D",row,__rstart+__nrows-1);\
+          //  for (__i=0; __i<nc; __i++) {\
+          //    if ((cols)[__i] < __start || (cols)[__i] >= __end) onz[row - __rstart]++; \
+          //    else if (dnz[row - __rstart] < __ncols) dnz[row - __rstart]++;\
+          //  }\
+          //} while (0)
+          __l=0;
+          if (__l<nrows) { // max(nrows)=1
+            //#define MatPreallocateSet(row,nc,cols,dnz,onz) 0;
+            {
+              PetscInt row, nc;
+              row = (rows)[__l*ny+j-ys];
+              nc =  ncols;
+              //do {
+                PetscInt __i;
+#ifdef VE_NOSETERRQ
+                if (row < __rstart) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Trying to set preallocation for row %D less than first local row %D",row,__rstart);
+                if (row >= __rstart+__nrows) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Trying to set preallocation for row %D greater than last local row %D",row,__rstart+__nrows-1);
+#endif
+                __i=0;
+                if (__i<nc) { // max(nc)=max(ncols)=1
+                  if ((cols)[__i*ny+j-ys] < __start || (cols)[__i*ny+j-ys] >= __end) onz[row - __rstart]++;
+                  else if (dnz[row - __rstart] < __ncols) dnz[row - __rstart]++;
+                  __i++;
+                }
+                if (__i<nc) { // max(nc)=max(ncols)=2
+                  if ((cols)[__i*ny+j-ys] < __start || (cols)[__i*ny+j-ys] >= __end) onz[row - __rstart]++;
+                  else if (dnz[row - __rstart] < __ncols) dnz[row - __rstart]++;
+                  __i++;
+                }
+                if (__i<nc) { // max(nc)=max(ncols)=3
+                  if ((cols)[__i*ny+j-ys] < __start || (cols)[__i*ny+j-ys] >= __end) onz[row - __rstart]++;
+                  else if (dnz[row - __rstart] < __ncols) dnz[row - __rstart]++;
+                  __i++;
+                }
+                if (__i<nc) { // max(nc)=max(ncols)=4
+                  if ((cols)[__i*ny+j-ys] < __start || (cols)[__i*ny+j-ys] >= __end) onz[row - __rstart]++;
+                  else if (dnz[row - __rstart] < __ncols) dnz[row - __rstart]++;
+                  __i++;
+                }
+                if (__i<nc) { // max(nc)=max(ncols)=5
+                  if ((cols)[__i*ny+j-ys] < __start || (cols)[__i*ny+j-ys] >= __end) onz[row - __rstart]++;
+                  else if (dnz[row - __rstart] < __ncols) dnz[row - __rstart]++;
+                  __i++;
+                }
+              //} while (0);
+            }
+            _4_ierr = 0;CHKERRQ(_4_ierr);
+            __l++;
+          }
+        //} while (0);
+        ierr = 0;
+      }
+      //-- exit --
+      CHKERRQ(ierr);
+    }
+  }
+ } else {
+  for (i=xs; i<xs+nx; i++) {
+
+    pstart = (bx == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-i));
+    pend   = (bx == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,m-i-1));
+
+    for (j=ys; j<ys+ny; j++) {
+      slot = i - gxs + gnx*(j - gys);
+
+      lstart = (by == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-j));
+      lend   = (by == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,n-j-1));
+
+      cnt = 0;
+      for (k=0; k<nc; k++) {
+        for (l=lstart; l<lend+1; l++) {
+          for (p=pstart; p<pend+1; p++) {
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[cnt++] = k + nc*(slot + gnx*l + p);
+            }
+          }
+        }
+        rows[k] = k + nc*(slot);
+      }
+      ierr = MatPreallocateSetLocalRemoveDups(ltog,nc,rows,ltog,cnt,cols,dnz,onz);CHKERRQ(ierr);
+    }
+  }
+ }
+#else
   for (i=xs; i<xs+nx; i++) {
 
     pstart = (bx == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-i));
@@ -1188,6 +1674,7 @@ PetscErrorCode DMCreateMatrix_DA_2d_MPIAIJ(DM da,Mat J,PetscBool isIS)
       }
     }
   }
+#endif
   ierr = MatSetBlockSize(J,nc);CHKERRQ(ierr);
   ierr = MatSeqAIJSetPreallocation(J,0,dnz);CHKERRQ(ierr);
   ierr = MatMPIAIJSetPreallocation(J,0,dnz,0,onz);CHKERRQ(ierr);
@@ -1203,6 +1690,1241 @@ PetscErrorCode DMCreateMatrix_DA_2d_MPIAIJ(DM da,Mat J,PetscBool isIS)
     PETSc ordering.
   */
   if (!da->prealloc_only) {
+
+#ifdef __ve__
+   PetscBool flg, flg2;
+   ierr = MatSetValues_IsMPIAIJ(J,&flg);
+   ierr = MatSetValues_IsSeqAIJ_SortedFull(J,&flg2);
+   if (flg==PETSC_TRUE && !PetscDefined(USE_DEBUG) && !J->ops->setvalueslocal && (nc+MAX_CNT)*ny <= BUF_SIZE && !J->was_assembled && !J->assembled) {
+
+    if (J->insertmode == NOT_SET_VALUES) {
+      J->insertmode = INSERT_VALUES;
+    }
+    else if (PetscUnlikely(J->insertmode != INSERT_VALUES)) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_ARG_WRONGSTATE,"Cannot mix add values and insert values");
+    
+    if (J->assembled) {
+      J->was_assembled = PETSC_TRUE;
+      J->assembled     = PETSC_FALSE;
+    }
+    ierr = PetscLogEventBegin(MAT_SetValues,J,0,0,0);CHKERRQ(ierr);
+
+    for (i=xs; i<xs+nx; i++) {
+
+      pstart = (bx == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-i));
+      pend   = (bx == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,m-i-1));
+
+     PetscInt  jj;
+     for (jj=0;jj<MAX_CNT;jj++) {
+      PetscInt buf_tb[BUF_SIZE];
+
+#pragma _NEC ivdep
+      for (j=ys; j<ys+ny; j++) {
+        slot = i - gxs + gnx*(j - gys);
+
+        lstart = (by == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-j));
+        lend   = (by == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,n-j-1));
+
+        cnt = 0;
+        l=lstart;
+        if (l<lend+1) { // max(lend-lstart+1)=1
+          p=pstart;
+          if (p<pend+1) { // max(pend-pstart+1)=1
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=2
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=3
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          l++;
+        }
+        if (l<lend+1) { // max(lend-lstart+1)=2
+          p=pstart;
+          if (p<pend+1) { // max(pend-pstart+1)=1
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=2
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=3
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          l++;
+        }
+        if (l<lend+1) { // max(lend-lstart+1)=3
+          p=pstart;
+          if (p<pend+1) { // max(pend-pstart+1)=1
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=2
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=3
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          l++;
+        }
+        k=0;
+        if (k<nc) { // max(nc)=1
+          rows[k*ny+j-ys] = k + nc*(slot);
+          k++;
+        }
+        //ierr = MatSetValuesLocal(J,nc,rows,cnt,cols,NULL,INSERT_VALUES);CHKERRQ(ierr);
+        //PetscErrorCode MatSetValuesLocal(Mat mat,PetscInt nrow,const PetscInt irow[],PetscInt ncol,const PetscInt icol[],const PetscScalar y[],InsertMode addv)
+        //-- enter --
+        {
+          PetscErrorCode ierr;
+          Mat mat;
+          PetscInt nrow;
+          const PetscInt *irow;
+          PetscInt ncol;
+          const PetscInt *icol;
+          const PetscScalar *y;
+          InsertMode addv;
+        
+          mat = J;
+          nrow = nc;
+          irow = rows;
+          ncol = cnt;
+          icol = cols;
+          y = NULL;
+          addv = INSERT_VALUES;
+        
+          PetscFunctionBeginHot;
+          PetscValidHeaderSpecific(mat,MAT_CLASSID,1);
+          PetscValidType(mat,1);
+          MatCheckPreallocated(mat,1);
+          if (!nrow || !ncol) continue; /* no values to insert */
+          PetscValidIntPointer(irow,3);
+          PetscValidIntPointer(icol,5);
+            //PetscInt buf[BUF_SIZE],*bufr=NULL,*bufc=NULL,*irowm,*icolm;
+            PetscInt *bufr=NULL,*bufc=NULL,*irowm,*icolm;
+              irowm = buf_tb; icolm = buf_tb+nrow*ny;
+#ifdef VE_SETERRQ
+            if (!mat->rmap->mapping) SETERRQ(PetscObjectComm((PetscObject)mat),PETSC_ERR_ARG_WRONGSTATE,"MatSetValuesLocal() cannot proceed without local-to-global row mapping (See MatSetLocalToGlobalMapping()).");
+            if (!mat->cmap->mapping) SETERRQ(PetscObjectComm((PetscObject)mat),PETSC_ERR_ARG_WRONGSTATE,"MatSetValuesLocal() cannot proceed without local-to-global column mapping (See MatSetLocalToGlobalMapping()).");
+#endif
+            //ierr = ISLocalToGlobalMappingApply(mat->rmap->mapping,nrow,irow,irowm);CHKERRQ(ierr);
+            //PetscErrorCode ISLocalToGlobalMappingApply(ISLocalToGlobalMapping mapping,PetscInt N,const PetscInt in[],PetscInt out[])
+            //-- enter --
+            {
+              PetscInt i,bs,Nmax;
+              ISLocalToGlobalMapping mapping;
+              PetscInt N;
+              const PetscInt *in;
+              PetscInt *out;
+        
+              mapping = mat->rmap->mapping;
+              N = nrow;
+              in = irow;
+              out = irowm;
+        
+              PetscFunctionBegin;
+              PetscValidHeaderSpecific(mapping,IS_LTOGM_CLASSID,1);
+              bs   = mapping->bs;
+              Nmax = bs*mapping->n;
+              if (bs == 1) {
+                const PetscInt *idx = mapping->indices;
+                i=0;
+                if (i<N) { // max(N)=1
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+              } else {
+                const PetscInt *idx = mapping->indices;
+                i=0;
+                if (i<N) { // max(N)=1
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+              }
+              ierr = 0;
+              //PetscFunctionReturn(0);
+            }
+            //-- exit --
+            //CHKERRQ(ierr);
+            //ierr = ISLocalToGlobalMappingApply(mat->cmap->mapping,ncol,icol,icolm);CHKERRQ(ierr);
+            //PetscErrorCode ISLocalToGlobalMappingApply(ISLocalToGlobalMapping mapping,PetscInt N,const PetscInt in[],PetscInt out[])
+            //-- enter --
+            {
+              PetscInt i,bs,Nmax;
+              ISLocalToGlobalMapping mapping;
+              PetscInt N;
+              const PetscInt *in;
+              PetscInt *out;
+        
+              mapping = mat->cmap->mapping;
+              N = ncol;
+              in = icol;
+              out = icolm;
+        
+              PetscFunctionBegin;
+              PetscValidHeaderSpecific(mapping,IS_LTOGM_CLASSID,1);
+              bs   = mapping->bs;
+              Nmax = bs*mapping->n;
+              if (bs == 1) {
+                const PetscInt *idx = mapping->indices;
+                i=0;
+                if (i<N) { // max(N)=1
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=2
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=3
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=4
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=5
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+              } else {
+                const PetscInt *idx = mapping->indices;
+                i=0;
+                if (i<N) { // max(N)=1
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=2
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=3
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=4
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=5
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+              }
+              ierr = 0;
+              //PetscFunctionReturn(0);
+            }
+            //-- exit --
+            //CHKERRQ(ierr);
+            //ierr = MatSetValues(mat,nrow,irowm,ncol,icolm,y,addv);CHKERRQ(ierr);
+            //PetscErrorCode MatSetValues(Mat mat,PetscInt m,const PetscInt idxm[],PetscInt n,const PetscInt idxn[],const PetscScalar v[],InsertMode addv)
+            //-- enter --
+            {
+              PetscErrorCode ierr;
+              PetscInt m;
+              const PetscInt *idxm;
+              PetscInt n;
+              const PetscInt *idxn;
+              const PetscScalar *v;
+            
+              m = nrow;
+              idxm = irowm;
+              n = ncol;
+              idxn = icolm;
+              v = y;
+            
+              PetscFunctionBeginHot;
+              PetscValidHeaderSpecific(mat,MAT_CLASSID,1);
+              PetscValidType(mat,1);
+              if (!m || !n) continue; /* no values to insert */
+              PetscValidIntPointer(idxm,3);
+              PetscValidIntPointer(idxn,5);
+              MatCheckPreallocated(mat,1);
+            
+              //ierr = (*mat->ops->setvalues)(mat,m,idxm,n,idxn,v,addv);CHKERRQ(ierr);
+              //PetscErrorCode MatSetValues_MPIAIJ(Mat mat,PetscInt m,const PetscInt im[],PetscInt n,const PetscInt in[],const PetscScalar v[],InsertMode addv)
+              //-- enter --
+              {
+                Mat_MPIAIJ     *aij = (Mat_MPIAIJ*)mat->data;
+                PetscScalar    value = 0.0;
+                PetscErrorCode ierr;
+                PetscInt       i,rstart  = mat->rmap->rstart,rend = mat->rmap->rend;
+                PetscInt       cstart      = mat->cmap->rstart,cend = mat->cmap->rend,row,col;
+                PetscBool      roworiented = aij->roworiented;
+              
+                const PetscInt *im;
+                const PetscInt *in;
+              
+                im = idxm;
+                in = idxn;
+              
+                /* Some Variables required in the macro */
+                Mat        A                    = aij->A;
+                Mat_SeqAIJ *a                   = (Mat_SeqAIJ*)A->data;
+                PetscInt   *aimax               = a->imax,*ai = a->i,*ailen = a->ilen,*aj = a->j;
+                PetscBool  ignorezeroentries    = a->ignorezeroentries;
+                Mat        B                    = aij->B;
+                Mat_SeqAIJ *b                   = (Mat_SeqAIJ*)B->data;
+                PetscInt   *bimax               = b->imax,*bi = b->i,*bilen = b->ilen,*bj = b->j,bm = aij->B->rmap->n,am = aij->A->rmap->n;
+                MatScalar  *aa,*ba;
+                /* This variable below is only for the PETSC_HAVE_VIENNACL or PETSC_HAVE_CUDA cases, but we define it in all cases because we
+                 * cannot use "#if defined" inside a macro. */
+                PETSC_UNUSED PetscBool inserted = PETSC_FALSE;
+              
+                PetscInt  *rp1,*rp2,ii,nrow1,nrow2,_i,rmax1,rmax2,N,low1,high1,low2,high2,t,lastcol1,lastcol2;
+                PetscInt  nonew;
+                MatScalar *ap1,*ap2;
+              
+                PetscFunctionBegin;
+#if defined(PETSC_HAVE_DEVICE)
+                if (A->offloadmask == PETSC_OFFLOAD_GPU) {
+                  const PetscScalar *dummy;
+                  ierr = MatSeqAIJGetArrayRead(A,&dummy);CHKERRQ(ierr);
+                  ierr = MatSeqAIJRestoreArrayRead(A,&dummy);CHKERRQ(ierr);
+                }
+                if (B->offloadmask == PETSC_OFFLOAD_GPU) {
+                  const PetscScalar *dummy;
+                  ierr = MatSeqAIJGetArrayRead(B,&dummy);CHKERRQ(ierr);
+                  ierr = MatSeqAIJRestoreArrayRead(B,&dummy);CHKERRQ(ierr);
+                }
+#endif
+                aa = a->a;
+                ba = b->a;
+                i=0;
+                if (i<m) { // max(m)=max(nrow)=1
+                  if (im[i*ny+j-ys] < 0) /* continue */ ; else
+                  {
+#ifdef VE_SETERRQ
+                  if (PetscUnlikely(im[i*ny+j-ys] >= mat->rmap->N)) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Row too large: row %D max %D",im[i*ny+j-ys],mat->rmap->N-1);
+#endif
+                  if (im[i*ny+j-ys] >= rstart && im[i*ny+j-ys] < rend) {
+                    row      = im[i*ny+j-ys] - rstart;
+                    lastcol1 = -1;
+                    rp1      = aj + ai[row];
+                    ap1      = aa + ai[row];
+                    rmax1    = aimax[row];
+                    nrow1    = ailen[row];
+                    low1     = 0;
+                    high1    = nrow1;
+                    lastcol2 = -1;
+                    rp2      = bj + bi[row];
+                    ap2      = ba + bi[row];
+                    rmax2    = bimax[row];
+                    nrow2    = bilen[row];
+                    low2     = 0;
+                    high2    = nrow2;
+              
+                    if (jj<n) { // max(n)=max(ncol)=1
+                      if (v)  value = roworiented ? v[i*n+jj] : v[i+jj*m];
+                      if (ignorezeroentries && value == 0.0 && (addv == ADD_VALUES) && im[i*ny+j-ys] != in[jj*ny+j-ys]) {
+                        ; // continue;
+                      } else
+                      if (in[jj*ny+j-ys] >= cstart && in[jj*ny+j-ys] < cend) {
+                        col   = in[jj*ny+j-ys] - cstart;
+                        nonew = a->nonew;
+
+                        //MatSetValues_SeqAIJ_A_Private(row,col,value,addv,im[i*ny+j-ys],in[jj*ny+j-ys]);
+                        //#define MatSetValues_SeqAIJ_A_Private(row,col,value,addv,orow,ocol)
+                        { //-- enter
+                          PetscInt  orow,ocol;
+                          PetscBool bflg, gflg; // bflg means break flag, gflg means goto flag
+                          orow = im[i*ny+j-ys];
+                          ocol = in[jj*ny+j-ys];
+                          if (col <= lastcol1)  low1 = 0;
+                          else                 high1 = nrow1;
+                          lastcol1 = col;
+                          if (high1-low1 > 5) { // max count=1
+                            t = (low1+high1)/2;
+                            if (rp1[t] > col) high1 = t;
+                            else              low1  = t;
+                          }
+                          gflg=PETSC_FALSE;
+                          _i=low1;
+                          bflg=PETSC_FALSE;
+                          if (_i<high1 && bflg==PETSC_FALSE) { // max(high1-low1+1)=1
+                            if (rp1[_i] > col) bflg = PETSC_TRUE;
+                            if (rp1[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap1[_i] += value;
+                                /* Not sure LogFlops will slow dow the code or not */
+                                //(void)PetscLogFlops(1.0);
+                               }
+                              else                    ap1[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_TRUE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (_i<high1 && bflg==PETSC_FALSE) { // max(high1-low1+1)=2
+                            if (rp1[_i] > col) bflg = PETSC_TRUE;
+                            if (rp1[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap1[_i] += value;
+                                /* Not sure LogFlops will slow dow the code or not */
+                                //(void)PetscLogFlops(1.0);
+                               }
+                              else                    ap1[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_TRUE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (_i<high1 && bflg==PETSC_FALSE) { // max(high1-low1+1)=3
+                            if (rp1[_i] > col) bflg = PETSC_TRUE;
+                            if (rp1[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap1[_i] += value;
+                                /* Not sure LogFlops will slow dow the code or not */
+                                //(void)PetscLogFlops(1.0);
+                               }
+                              else                    ap1[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_TRUE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (_i<high1 && bflg==PETSC_FALSE) { // max(high1-low1+1)=4
+                            if (rp1[_i] > col) bflg = PETSC_TRUE;
+                            if (rp1[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap1[_i] += value;
+                                /* Not sure LogFlops will slow dow the code or not */
+                                //(void)PetscLogFlops(1.0);
+                               }
+                              else                    ap1[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_TRUE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (_i<high1 && bflg==PETSC_FALSE) { // max(high1-low1+1)=5
+                            if (rp1[_i] > col) bflg = PETSC_TRUE;
+                            if (rp1[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap1[_i] += value;
+                                /* Not sure LogFlops will slow dow the code or not */
+                                //(void)PetscLogFlops(1.0);
+                               }
+                              else                    ap1[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_TRUE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (gflg == PETSC_FALSE && value == 0.0 && ignorezeroentries && row != col) {low1 = 0; high1 = nrow1;gflg = PETSC_TRUE;}
+                          if (gflg == PETSC_FALSE && nonew == 1) {low1 = 0; high1 = nrow1; gflg = PETSC_TRUE;}
+                          if (gflg==PETSC_FALSE) {
+#ifdef VE_SETERRQ
+                            if (nonew == -1) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Inserting a new nonzero at global row/column (%D, %D) into matrix", orow, ocol);
+#endif
+                            // MatSeqXAIJReallocateAIJ(A,am,1,nrow1,row,col,rmax1,aa,ai,aj,rp1,ap1,aimax,nonew,MatScalar);
+                            // if nrow1<=rmax1 do nothing
+                            N = nrow1++ - 1; a->nz++; high1++;
+                            /* shift up all the later entries in this row */
+                            //ierr = PetscArraymove(rp1+_i+1,rp1+_i,N-_i+1);CHKERRQ(ierr);
+                            //ierr = PetscArraymove(ap1+_i+1,ap1+_i,N-_i+1);CHKERRQ(ierr);
+                            rp1[_i] = col;
+                            ap1[_i] = value;
+                            A->nonzerostate++;
+                          }
+                          //a_noinsert: ;
+                          ailen[row] = nrow1;
+                        } //-- exit --
+#if defined(PETSC_HAVE_DEVICE)
+                        if (A->offloadmask != PETSC_OFFLOAD_UNALLOCATED && inserted) A->offloadmask = PETSC_OFFLOAD_CPU;
+#endif
+                      } else if (in[jj*ny+j-ys] < 0) {;} // continue
+#ifdef VE_NOSETERRQ
+                      else if (in[jj*ny+j-ys] >= mat->cmap->N) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Column too large: col %D max %D",in[jj*ny+j-ys],mat->cmap->N-1);
+#endif
+                      else {
+                        col = in[jj*ny+j-ys];
+                        nonew = b->nonew;
+                        //MatSetValues_SeqAIJ_B_Private(row,col,value,addv,im[i*ny+j-ys],in[jj*ny+j-ys]);
+                        //#define MatSetValues_SeqAIJ_B_Private(row,col,value,addv,orow,ocol)
+                        { //-- enter --
+                          PetscInt  orow,ocol;
+                          PetscBool bflg, gflg; // bflg means break flag, gflg means goto flag
+                          orow = im[i*ny+j-ys];
+                          ocol = in[jj*ny+j-ys];
+
+                          if (col <= lastcol2) low2 = 0;
+                          else high2 = nrow2;
+                          lastcol2 = col;
+                          if (high2-low2 > 5) { // max count=1
+                            t = (low2+high2)/2;
+                            if (rp2[t] > col) high2 = t;
+                            else             low2  = t;
+                          }
+                          gflg = PETSC_FALSE;
+                          _i=low2;
+                          bflg = PETSC_FALSE;
+                          if (_i<high2 && bflg==PETSC_FALSE) { // max(high2-low2+1)=1
+                            if (rp2[_i] > col) bflg = PETSC_TRUE;
+                            if (rp2[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap2[_i] += value;
+                                //(void)PetscLogFlops(1.0);
+                              }
+                              else                    ap2[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_FALSE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (_i<high2 && bflg==PETSC_FALSE) { // max(high2-low2+1)=2
+                            if (rp2[_i] > col) bflg = PETSC_TRUE;
+                            if (rp2[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap2[_i] += value;
+                                //(void)PetscLogFlops(1.0);
+                              }
+                              else                    ap2[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_FALSE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (_i<high2 && bflg==PETSC_FALSE) { // max(high2-low2+1)=3
+                            if (rp2[_i] > col) bflg = PETSC_TRUE;
+                            if (rp2[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap2[_i] += value;
+                                //(void)PetscLogFlops(1.0);
+                              }
+                              else                    ap2[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_FALSE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (_i<high2 && bflg==PETSC_FALSE) { // max(high2-low2+1)=4
+                            if (rp2[_i] > col) bflg = PETSC_TRUE;
+                            if (rp2[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap2[_i] += value;
+                                //(void)PetscLogFlops(1.0);
+                              }
+                              else                    ap2[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_FALSE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (_i<high2 && bflg==PETSC_FALSE) { // max(high2-low2+1)=5
+                            if (rp2[_i] > col) bflg = PETSC_TRUE;
+                            if (rp2[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap2[_i] += value;
+                                //(void)PetscLogFlops(1.0);
+                              }
+                              else                    ap2[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_FALSE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (_i<high2 && bflg==PETSC_FALSE) { // max(high2-low2+1)=6
+                            if (rp2[_i] > col) bflg = PETSC_TRUE;
+                            if (rp2[_i] == col) {
+                              if (addv == ADD_VALUES) {
+                                ap2[_i] += value;
+                                //(void)PetscLogFlops(1.0);
+                              }
+                              else                    ap2[_i] = value;
+                              inserted = PETSC_TRUE;
+                              bflg = gflg = PETSC_FALSE;
+                            }
+                            if (bflg==PETSC_FALSE) _i++;
+                          }
+                          if (gflg == PETSC_FALSE && value == 0.0 && ignorezeroentries) {low2 = 0; high2 = nrow2;gflg = PETSC_TRUE;}
+                          if (gflg == PETSC_FALSE && nonew == 1) {low2 = 0; high2 = nrow2; gflg = PETSC_TRUE;}
+                          if (gflg == PETSC_FALSE ) {
+#ifdef VE_NOSETERRQ
+                            if (nonew == -1) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Inserting a new nonzero at global row/column (%D, %D) into matrix", orow, ocol);
+#endif
+                            // MatSeqXAIJReallocateAIJ(B,bm,1,nrow2,row,col,rmax2,ba,bi,bj,rp2,ap2,bimax,nonew,MatScalar);
+                            // if nrow1<=rmax1 do nothing
+                            N = nrow2++ - 1; b->nz++; high2++;
+                            /* shift up all the later entries in this row */
+                            //ierr = PetscArraymove(rp2+_i+1,rp2+_i,N-_i+1);CHKERRQ(ierr);
+                            //ierr = PetscArraymove(ap2+_i+1,ap2+_i,N-_i+1);CHKERRQ(ierr);
+                            rp2[_i] = col;
+                            ap2[_i] = value;
+                            B->nonzerostate++;
+                          }
+                          //b_noinsert: ;
+                          bilen[row] = nrow2;
+                        } //-- exit --
+#if defined(PETSC_HAVE_DEVICE)
+                        if (B->offloadmask != PETSC_OFFLOAD_UNALLOCATED && inserted) B->offloadmask = PETSC_OFFLOAD_CPU;
+#endif
+                      }
+                    }
+                  } else {
+#ifdef VE_SETERRQ
+                    if (mat->nooffprocentries) SETERRQ1(PETSC_COMM_SELF,PETSC_ERR_ARG_WRONG,"Setting off process row %D even though MatSetOption(,MAT_NO_OFF_PROC_ENTRIES,PETSC_TRUE) was set",im[i*ny+j-ys]);
+#endif
+                  }
+                  }
+                  i++;
+                }
+                ierr = 0;
+                //PetscFunctionReturn(0);
+              }
+              //-- exit --
+              //CHKERRQ(ierr);
+              ierr = 0;
+              //PetscFunctionReturn(0);
+            }
+            //-- exit --
+          ierr = 0;
+          //PetscFunctionReturn(0);
+        }
+        //-- exit --
+        //CHKERRQ(ierr);
+      } // j loop
+
+     } // jj loop
+
+    } // i loop
+    ierr = PetscLogEventEnd(MAT_SetValues,J,0,0,0);CHKERRQ(ierr);
+
+   } else if (flg2==PETSC_TRUE && !PetscDefined(USE_DEBUG) && !J->ops->setvalueslocal && (nc+MAX_CNT)*ny <= BUF_SIZE && !J->was_assembled && !J->assembled) {
+
+    if (J->insertmode == NOT_SET_VALUES) {
+      J->insertmode = INSERT_VALUES;
+    }
+    else if (PetscUnlikely(J->insertmode != INSERT_VALUES)) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_ARG_WRONGSTATE,"Cannot mix add values and insert values");
+    
+    if (J->assembled) {
+      J->was_assembled = PETSC_TRUE;
+      J->assembled     = PETSC_FALSE;
+    }
+    ierr = PetscLogEventBegin(MAT_SetValues,J,0,0,0);CHKERRQ(ierr);
+
+    for (i=xs; i<xs+nx; i++) {
+
+      pstart = (bx == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-i));
+      pend   = (bx == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,m-i-1));
+
+      PetscInt buf_tb[BUF_SIZE];
+      int jj;
+
+#pragma _NEC ivdep
+      for (j=ys; j<ys+ny; j++) {
+        slot = i - gxs + gnx*(j - gys);
+
+        lstart = (by == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-j));
+        lend   = (by == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,n-j-1));
+
+        cnt = 0;
+        l=lstart;
+        if (l<lend+1) { // max(lend-lstart+1)=1
+          p=pstart;
+          if (p<pend+1) { // max(pend-pstart+1)=1
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=2
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=3
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          l++;
+        }
+        if (l<lend+1) { // max(lend-lstart+1)=2
+          p=pstart;
+          if (p<pend+1) { // max(pend-pstart+1)=1
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=2
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=3
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          l++;
+        }
+        if (l<lend+1) { // max(lend-lstart+1)=3
+          p=pstart;
+          if (p<pend+1) { // max(pend-pstart+1)=1
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=2
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          if (p<pend+1) { // max(pend-pstart+1)=3
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[(cnt++)*ny+j-ys] = nc*(slot + gnx*l + p);
+              k=1;
+              if (k<nc) { // max(nc)=1
+                cols[cnt*ny+j-ys] = 1 + cols[(cnt-1)*ny+j-ys];cnt++;
+                k++;
+              }
+            }
+            p++;
+          }
+          l++;
+        }
+        k=0;
+        if (k<nc) { // max(nc)=1
+          rows[k*ny+j-ys] = k + nc*(slot);
+          k++;
+        }
+
+        //ierr = MatSetValuesLocal(J,nc,rows,cnt,cols,NULL,INSERT_VALUES);CHKERRQ(ierr);
+        //PetscErrorCode MatSetValuesLocal(Mat mat,PetscInt nrow,const PetscInt irow[],PetscInt ncol,const PetscInt icol[],const PetscScalar y[],InsertMode addv)
+        //-- enter --
+        {
+          PetscErrorCode ierr;
+          Mat mat;
+          PetscInt nrow;
+          const PetscInt *irow;
+          PetscInt ncol;
+          const PetscInt *icol;
+          const PetscScalar *y;
+          InsertMode addv;
+        
+          mat = J;
+          nrow = nc;
+          irow = rows;
+          ncol = cnt;
+          icol = cols;
+          y = NULL;
+          addv = INSERT_VALUES;
+        
+          PetscFunctionBeginHot;
+          PetscValidHeaderSpecific(mat,MAT_CLASSID,1);
+          PetscValidType(mat,1);
+          MatCheckPreallocated(mat,1);
+          if (!nrow || !ncol) continue; /* no values to insert */
+          PetscValidIntPointer(irow,3);
+          PetscValidIntPointer(icol,5);
+            //PetscInt buf[BUF_SIZE],*bufr=NULL,*bufc=NULL,*irowm,*icolm;
+            PetscInt *bufr=NULL,*bufc=NULL,*irowm,*icolm;
+              irowm = buf_tb; icolm = buf_tb+nrow*ny;
+#ifdef VE_SETERRQ
+            if (!mat->rmap->mapping) SETERRQ(PetscObjectComm((PetscObject)mat),PETSC_ERR_ARG_WRONGSTATE,"MatSetValuesLocal() cannot proceed without local-to-global row mapping (See MatSetLocalToGlobalMapping()).");
+            if (!mat->cmap->mapping) SETERRQ(PetscObjectComm((PetscObject)mat),PETSC_ERR_ARG_WRONGSTATE,"MatSetValuesLocal() cannot proceed without local-to-global column mapping (See MatSetLocalToGlobalMapping()).");
+#endif
+            //ierr = ISLocalToGlobalMappingApply(mat->rmap->mapping,nrow,irow,irowm);CHKERRQ(ierr);
+            //PetscErrorCode ISLocalToGlobalMappingApply(ISLocalToGlobalMapping mapping,PetscInt N,const PetscInt in[],PetscInt out[])
+            //-- enter --
+            {
+              PetscInt i,bs,Nmax;
+              ISLocalToGlobalMapping mapping;
+              PetscInt N;
+              const PetscInt *in;
+              PetscInt *out;
+        
+              mapping = mat->rmap->mapping;
+              N = nrow;
+              in = irow;
+              out = irowm;
+        
+              PetscFunctionBegin;
+              PetscValidHeaderSpecific(mapping,IS_LTOGM_CLASSID,1);
+              bs   = mapping->bs;
+              Nmax = bs*mapping->n;
+              if (bs == 1) {
+                const PetscInt *idx = mapping->indices;
+                i=0;
+                if (i<N) { // max(N)=1
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+              } else {
+                const PetscInt *idx = mapping->indices;
+                i=0;
+                if (i<N) { // max(N)=1
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+              }
+              ierr = 0;
+              //PetscFunctionReturn(0);
+            }
+            //-- exit --
+            //CHKERRQ(ierr);
+            //ierr = ISLocalToGlobalMappingApply(mat->cmap->mapping,ncol,icol,icolm);CHKERRQ(ierr);
+            //PetscErrorCode ISLocalToGlobalMappingApply(ISLocalToGlobalMapping mapping,PetscInt N,const PetscInt in[],PetscInt out[])
+            //-- enter --
+            {
+              PetscInt i,bs,Nmax;
+              ISLocalToGlobalMapping mapping;
+              PetscInt N;
+              const PetscInt *in;
+              PetscInt *out;
+        
+              mapping = mat->cmap->mapping;
+              N = ncol;
+              in = icol;
+              out = icolm;
+        
+              PetscFunctionBegin;
+              PetscValidHeaderSpecific(mapping,IS_LTOGM_CLASSID,1);
+              bs   = mapping->bs;
+              Nmax = bs*mapping->n;
+              if (bs == 1) {
+                const PetscInt *idx = mapping->indices;
+                i=0;
+                if (i<N) { // max(N)=1
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=2
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=3
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=4
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=5
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]];
+                  }
+                  i++;
+                }
+              } else {
+                const PetscInt *idx = mapping->indices;
+                i=0;
+                if (i<N) { // max(N)=1
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=2
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=3
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=4
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+                if (i<N) { // max(N)=5
+                  if (in[i*ny+j-ys] < 0) {
+                    out[i*ny+j-ys] = in[i*ny+j-ys];
+                  } else {
+#ifdef VE_SETERRQ
+                    if (in[i*ny+j-ys] >= Nmax) SETERRQ3(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Local index %D too large %D (max) at %D",in[i*ny+j-ys],Nmax-1,i);
+#endif
+                    out[i*ny+j-ys] = idx[in[i*ny+j-ys]/bs]*bs + (in[i*ny+j-ys] % bs);
+                  }
+                  i++;
+                }
+              }
+              ierr = 0;
+              //PetscFunctionReturn(0);
+            }
+            //-- exit --
+            //CHKERRQ(ierr);
+            //ierr = MatSetValues(mat,nrow,irowm,ncol,icolm,y,addv);CHKERRQ(ierr);
+            //PetscErrorCode MatSetValues(Mat mat,PetscInt m,const PetscInt idxm[],PetscInt n,const PetscInt idxn[],const PetscScalar v[],InsertMode addv)
+            //-- enter --
+            {
+              PetscErrorCode ierr;
+              PetscInt m;
+              const PetscInt *idxm;
+              PetscInt n;
+              const PetscInt *idxn;
+              const PetscScalar *v;
+            
+              m = nrow;
+              idxm = irowm;
+              n = ncol;
+              idxn = icolm;
+              v = y;
+         
+              PetscFunctionBeginHot;
+              PetscValidHeaderSpecific(mat,MAT_CLASSID,1);
+              PetscValidType(mat,1);
+              if (!m || !n) continue; /* no values to insert */
+              PetscValidIntPointer(idxm,3);
+              PetscValidIntPointer(idxn,5);
+              MatCheckPreallocated(mat,1);
+            
+              //ierr = (*mat->ops->setvalues)(mat,m,idxm,n,idxn,v,addv);CHKERRQ(ierr);
+              //PetscErrorCode MatSetValues_SeqAIJ_SortedFull(Mat A,PetscInt m,const PetscInt im[],PetscInt n,const PetscInt in[],const PetscScalar v[],InsertMode is)
+              //-- enter --
+              {
+                Mat A;
+                A = mat;
+                Mat_SeqAIJ     *a = (Mat_SeqAIJ*)A->data;
+                PetscInt       *rp,k,row;
+                PetscInt       *ai = a->i,*ailen = a->ilen;
+                PetscErrorCode ierr;
+                PetscInt       *aj = a->j;
+                MatScalar      *aa = a->a,*ap;
+              
+                const PetscInt *im;
+                const PetscInt *in;
+                InsertMode is;
+              
+                im = idxm;
+                in = idxn;
+                is = addv;
+              
+                PetscFunctionBegin;
+                k=0;
+                if (k<m) { /* loop over added rows */ // max(m)=1
+                  row  = im[k*ny+j-ys];
+#ifdef VE_SETERRQ
+                  if (PetscUnlikelyDebug(n > a->imax[row])) SETERRQ1(PETSC_COMM_SELF,PETSC_ERR_ARG_WRONG,"Preallocation for row %D does not match number of columns provided",n);
+#endif
+                  rp   = aj + ai[row];
+                  ap   = aa + ai[row];
+                  if (!A->was_assembled) {
+                    //ierr = PetscMemcpy(rp,in,n*sizeof(PetscInt));CHKERRQ(ierr);
+                    jj=0;
+                    if (jj<n) { rp[jj] = in[jj*ny+j-ys]; jj++; } // max(n)=1
+                    if (jj<n) { rp[jj] = in[jj*ny+j-ys]; jj++; } // max(n)=2
+                    if (jj<n) { rp[jj] = in[jj*ny+j-ys]; jj++; } // max(n)=3
+                    if (jj<n) { rp[jj] = in[jj*ny+j-ys]; jj++; } // max(n)=4
+                    if (jj<n) { rp[jj] = in[jj*ny+j-ys]; jj++; } // max(n)=5
+                  }
+                  if (!A->structure_only) {
+                    if (v) {
+                      //ierr = PetscMemcpy(ap,v,n*sizeof(PetscScalar));CHKERRQ(ierr);
+                      v   += n;
+                    } else {
+                      //ierr = PetscMemzero(ap,n*sizeof(PetscScalar));CHKERRQ(ierr);
+                      jj=0;
+                      if (jj<n) { ap[jj] = 0.0; jj++; } // max(n)=1
+                      if (jj<n) { ap[jj] = 0.0; jj++; } // max(n)=2
+                      if (jj<n) { ap[jj] = 0.0; jj++; } // max(n)=3
+                      if (jj<n) { ap[jj] = 0.0; jj++; } // max(n)=4
+                      if (jj<n) { ap[jj] = 0.0; jj++; } // max(n)=5
+                    }
+                  }
+                  ailen[row] = n;
+                  a->nz      += n;
+                  k++;
+                }
+#if defined(PETSC_HAVE_DEVICE)
+                if (A->offloadmask != PETSC_OFFLOAD_UNALLOCATED && m && n) A->offloadmask = PETSC_OFFLOAD_CPU;
+#endif
+                //PetscFunctionReturn(0);
+              }
+              //-- exit --
+              //CHKERRQ(ierr);
+              ierr = 0;
+              //PetscFunctionReturn(0);
+            }
+            //-- exit --
+          ierr = 0;
+          //PetscFunctionReturn(0);
+        }
+        //-- exit --
+        //CHKERRQ(ierr);
+      } // j loop
+
+    } // i loop
+    ierr = PetscLogEventEnd(MAT_SetValues,J,0,0,0);CHKERRQ(ierr);
+
+   } else {
     for (i=xs; i<xs+nx; i++) {
 
       pstart = (bx == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-i));
@@ -1229,6 +2951,35 @@ PetscErrorCode DMCreateMatrix_DA_2d_MPIAIJ(DM da,Mat J,PetscBool isIS)
         ierr = MatSetValuesLocal(J,nc,rows,cnt,cols,NULL,INSERT_VALUES);CHKERRQ(ierr);
       }
     }
+   }
+#else
+    for (i=xs; i<xs+nx; i++) {
+
+      pstart = (bx == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-i));
+      pend   = (bx == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,m-i-1));
+
+      for (j=ys; j<ys+ny; j++) {
+        slot = i - gxs + gnx*(j - gys);
+
+        lstart = (by == DM_BOUNDARY_PERIODIC) ? -s : (PetscMax(-s,-j));
+        lend   = (by == DM_BOUNDARY_PERIODIC) ?  s : (PetscMin(s,n-j-1));
+
+        cnt = 0;
+        for (l=lstart; l<lend+1; l++) {
+          for (p=pstart; p<pend+1; p++) {
+            if ((st == DMDA_STENCIL_BOX) || (!l || !p)) {  /* entries on star have either l = 0 or p = 0 */
+              cols[cnt++] = nc*(slot + gnx*l + p);
+              for (k=1; k<nc; k++) {
+                cols[cnt] = 1 + cols[cnt-1];cnt++;
+              }
+            }
+          }
+        }
+        for (k=0; k<nc; k++) rows[k] = k + nc*(slot);
+        ierr = MatSetValuesLocal(J,nc,rows,cnt,cols,NULL,INSERT_VALUES);CHKERRQ(ierr);
+      }
+    }
+#endif
     /* do not copy values to GPU since they are all zero and not yet needed there */
     ierr = MatBindToCPU(J,PETSC_TRUE);CHKERRQ(ierr);
     ierr = MatAssemblyBegin(J,MAT_FINAL_ASSEMBLY);CHKERRQ(ierr);

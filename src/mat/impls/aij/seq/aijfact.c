@@ -486,12 +486,18 @@ PetscErrorCode MatLUFactorNumeric_SeqAIJ(Mat B,Mat A,const MatFactorInfo *info)
   if (info->shifttype == (PetscReal) MAT_SHIFT_POSITIVE_DEFINITE) { /* set sctx.shift_top=max{rs} */
     ddiag          = a->diag;
     sctx.shift_top = info->zeropivot;
+#ifdef __ve__
+#pragma _NEC novector
+#endif
     for (i=0; i<n; i++) {
       /* calculate sum(|aij|)-RealPart(aii), amt of shift needed for this row */
       d  = (aa)[ddiag[i]];
       rs = -PetscAbsScalar(d) - PetscRealPart(d);
       v  = aa+ai[i];
       nz = ai[i+1] - ai[i];
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for (j=0; j<nz; j++) rs += PetscAbsScalar(v[j]);
       if (rs>sctx.shift_top) sctx.shift_top = rs;
     }
@@ -513,17 +519,26 @@ PetscErrorCode MatLUFactorNumeric_SeqAIJ(Mat B,Mat A,const MatFactorInfo *info)
       /* L part */
       nz    = bi[i+1] - bi[i];
       bjtmp = bj + bi[i];
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for  (j=0; j<nz; j++) rtmp[bjtmp[j]] = 0.0;
 
       /* U part */
       nz    = bdiag[i]-bdiag[i+1];
       bjtmp = bj + bdiag[i+1]+1;
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for  (j=0; j<nz; j++) rtmp[bjtmp[j]] = 0.0;
 
       /* load in initial (unfactored row) */
       nz    = ai[r[i]+1] - ai[r[i]];
       ajtmp = aj + ai[r[i]];
       v     = aa + ai[r[i]];
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for (j=0; j<nz; j++) {
         rtmp[ics[ajtmp[j]]] = v[j];
       }
@@ -545,6 +560,9 @@ PetscErrorCode MatLUFactorNumeric_SeqAIJ(Mat B,Mat A,const MatFactorInfo *info)
           pv = b->a + bdiag[row+1]+1;
           nz = bdiag[row]-bdiag[row+1]-1; /* num of entries in U(row,:) excluding diag */
 
+#ifdef __ve__
+#pragma _NEC novector
+#endif
           for (j=0; j<nz; j++) rtmp[pj[j]] -= multiplier * pv[j];
           ierr = PetscLogFlops(1+2.0*nz);CHKERRQ(ierr);
         }
@@ -557,6 +575,9 @@ PetscErrorCode MatLUFactorNumeric_SeqAIJ(Mat B,Mat A,const MatFactorInfo *info)
       pv = b->a + bi[i];
       pj = b->j + bi[i];
       nz = bi[i+1] - bi[i];
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for (j=0; j<nz; j++) {
         pv[j] = rtmp[pj[j]]; rs += PetscAbsScalar(pv[j]);
       }
@@ -565,6 +586,9 @@ PetscErrorCode MatLUFactorNumeric_SeqAIJ(Mat B,Mat A,const MatFactorInfo *info)
       pv = b->a + bdiag[i+1]+1;
       pj = b->j + bdiag[i+1]+1;
       nz = bdiag[i] - bdiag[i+1]-1;
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for (j=0; j<nz; j++) {
         pv[j] = rtmp[pj[j]]; rs += PetscAbsScalar(pv[j]);
       }
@@ -1631,10 +1655,16 @@ PetscErrorCode MatILUFactorSymbolic_SeqAIJ_ilu0(Mat fact,Mat A,IS isrow,IS iscol
 
   /* L part */
   bi[0] = 0;
+#ifdef __ve__
+#pragma _NEC novector
+#endif
   for (i=0; i<n; i++) {
     nz      = adiag[i] - ai[i];
     bi[i+1] = bi[i] + nz;
     aj      = a->j + ai[i];
+#ifdef __ve__
+#pragma _NEC novector
+#endif
     for (j=0; j<nz; j++) {
       /*   *bj = aj[j]; bj++; */
       bj[k++] = aj[j];
@@ -1643,9 +1673,15 @@ PetscErrorCode MatILUFactorSymbolic_SeqAIJ_ilu0(Mat fact,Mat A,IS isrow,IS iscol
 
   /* U part */
   bdiag[n] = bi[n]-1;
+#ifdef __ve__
+#pragma _NEC novector
+#endif
   for (i=n-1; i>=0; i--) {
     nz = ai[i+1] - adiag[i] - 1;
     aj = a->j + adiag[i] + 1;
+#ifdef __ve__
+#pragma _NEC novector
+#endif
     for (j=0; j<nz; j++) {
       /*      *bj = aj[j]; bj++; */
       bj[k++] = aj[j];
@@ -1736,7 +1772,45 @@ PetscErrorCode MatILUFactorSymbolic_SeqAIJ(Mat fact,Mat A,IS isrow,IS iscol,cons
     if (!nnz) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_MAT_LU_ZRPVT,"Empty row in matrix: row in original ordering %D in permuted ordering %D",r[i],i);
     cols   = aj + ai[r[i]];
     lnk[i] = -1; /* marker to indicate if diagonal exists */
+#ifndef __ve__
     ierr   = PetscIncompleteLLInit(nnz,cols,n,ic,nlnk,lnk,lnk_lvl,lnkbt);CHKERRQ(ierr);
+#else
+ierr = 0;
+{
+  PetscInt _k, _entry, _location, _lnkdata;
+  nlnk = 0;
+  _lnkdata = n;
+#pragma _NEC novector
+  for (_k = 0; _k < nnz; _k++)
+    {
+      _entry = ic[cols[_k]];
+      if (!PetscBTLookupSet (lnkbt, _entry))
+        {
+          if (_k && _entry < _lnkdata)
+            _lnkdata = n;
+          do
+            {
+              _location = _lnkdata;
+              _lnkdata = lnk[_location];
+            }
+          while (_entry > _lnkdata);
+          lnk[_location] = _entry;
+          lnk[_entry] = _lnkdata;
+          lnk_lvl[_entry] = 0;
+          nlnk++;
+          _lnkdata = _entry;
+        }
+    }
+};
+
+do
+  {
+    if (__builtin_expect (! !(ierr), 0))
+      return PetscError (1, 1938, __func__, "aijfact.c", ierr,
+                         PETSC_ERROR_REPEAT, " ");
+  }
+while (0);
+#endif
     nzi   += nlnk;
 
     /* make sure diagonal entry is included */
@@ -1757,7 +1831,52 @@ PetscErrorCode MatILUFactorSymbolic_SeqAIJ(Mat fact,Mat A,IS isrow,IS iscol,cons
       cols     = bj_ptr[prow] + nnz + 1;
       cols_lvl = bjlvl_ptr[prow] + nnz + 1;
       nnz      = bi[prow+1] - bi[prow] - nnz - 1;
+#ifndef __ve__
       ierr     = PetscILULLAddSorted(nnz,cols,levels,cols_lvl,prow,nlnk,lnk,lnk_lvl,lnkbt,prow);CHKERRQ(ierr);
+#else
+ierr = 0;
+{
+  PetscInt _k, _entry, _location, _lnkdata, _incrlev, _lnklvl_prow =
+    lnk_lvl[prow];
+  nlnk = 0;
+  _lnkdata = prow;
+#pragma _NEC novector
+  for (_k = 0; _k < nnz; _k++)
+    {
+      _incrlev = cols_lvl[_k] + _lnklvl_prow + 1;
+      if (_incrlev > levels)
+        continue;
+      _entry = cols[_k];
+      if (!PetscBTLookupSet (lnkbt, _entry))
+        {
+          do
+            {
+              _location = _lnkdata;
+              _lnkdata = lnk[_location];
+            }
+          while (_entry > _lnkdata);
+          lnk[_location] = _entry;
+          lnk[_entry] = _lnkdata;
+          lnk_lvl[_entry] = _incrlev;
+          nlnk++;
+          _lnkdata = _entry;
+        }
+      else
+        {
+          if (lnk_lvl[_entry] > _incrlev)
+            lnk_lvl[_entry] = _incrlev;
+        }
+    }
+};
+
+do
+  {
+    if (__builtin_expect (! !(ierr), 0))
+      return PetscError (1, 1959, __func__, "aijfact.c", ierr,
+                         PETSC_ERROR_REPEAT, " ");
+  }
+while (0);
+#endif
       nzi     += nlnk;
       prow     = lnk[prow];
       nzbd++;
@@ -2072,6 +2191,9 @@ PetscErrorCode MatCholeskyFactorNumeric_SeqAIJ(Mat B,Mat A,const MatFactorInfo *
       rs = -PetscAbsScalar(d) - PetscRealPart(d);
       v  = aa+ai[i];
       nz = ai[i+1] - ai[i];
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for (j=0; j<nz; j++) rs += PetscAbsScalar(v[j]);
       if (rs>sctx.shift_top) sctx.shift_top = rs;
     }
@@ -2105,6 +2227,9 @@ PetscErrorCode MatCholeskyFactorNumeric_SeqAIJ(Mat B,Mat A,const MatFactorInfo *
       /* load in initial unfactored row */
       bval = ba + bi[k];
       jmin = ai[rip[k]]; jmax = ai[rip[k]+1];
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for (j = jmin; j < jmax; j++) {
         col = riip[aj[j]];
         if (col >= k) { /* only take upper triangular entry */
@@ -2131,6 +2256,9 @@ PetscErrorCode MatCholeskyFactorNumeric_SeqAIJ(Mat B,Mat A,const MatFactorInfo *
         /* add multiple of row i to k-th row */
         jmin = ili + 1; jmax = bi[i+1];
         if (jmin < jmax) {
+#ifdef __ve__
+#pragma _NEC novector
+#endif
           for (j=jmin; j<jmax; j++) rtmp[bj[j]] += uikdi*ba[j];
           /* update il and c2r for row i */
           il[i] = jmin;
@@ -2143,6 +2271,9 @@ PetscErrorCode MatCholeskyFactorNumeric_SeqAIJ(Mat B,Mat A,const MatFactorInfo *
       rs   = 0.0;
       jmin = bi[k]; jmax = bi[k+1]-1;
       if (jmin < jmax) {
+#ifdef __ve__
+#pragma _NEC novector
+#endif
         for (j=jmin; j<jmax; j++) {
           col = bj[j]; ba[j] = rtmp[col]; rs += PetscAbsScalar(ba[j]);
         }
@@ -3133,7 +3264,16 @@ PetscErrorCode MatSolve_SeqAIJ_NaturalOrdering(Mat A,Vec bb,Vec xx)
   for (i=1; i<n; i++) {
     nz  = ai[i+1] - ai[i];
     sum = b[i];
+#ifndef __ve__
     PetscSparseDenseMinusDot(sum,x,v,vi,nz);
+#else
+{
+  PetscInt __i;
+#pragma _NEC novector
+  for (__i = 0; __i < nz; __i++)
+    sum -= v[__i] * x[vi[__i]];
+};
+#endif
     v   += nz;
     vi  += nz;
     x[i] = sum;
@@ -3145,7 +3285,16 @@ PetscErrorCode MatSolve_SeqAIJ_NaturalOrdering(Mat A,Vec bb,Vec xx)
     vi  = aj + adiag[i+1] + 1;
     nz  = adiag[i] - adiag[i+1]-1;
     sum = x[i];
+#ifndef __ve__
     PetscSparseDenseMinusDot(sum,x,v,vi,nz);
+#else
+{
+  PetscInt __i;
+#pragma _NEC novector
+  for (__i = 0; __i < nz; __i++)
+    sum -= v[__i] * x[vi[__i]];
+};
+#endif
     x[i] = sum*v[nz]; /* x[i]=aa[adiag[i]]*sum; v++; */
   }
 

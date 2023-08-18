@@ -1,4 +1,13 @@
 
+#ifdef __ve__
+#include <../src/mat/impls/aij/seq/aij.h>
+#include <../src/mat/impls/aij/mpi/mpiaij.h>
+#include <petsc/private/matimpl.h>        /*I "petscmat.h" I*/
+#include <petsc/private/isimpl.h>
+#include <petsc/private/vecimpl.h>
+//#define VE_SETERRQ
+#endif
+
 /*
   Code for interpolating between grids represented by DMDAs
 */
@@ -268,6 +277,83 @@ PetscErrorCode DMCreateInterpolation_DA_1D_Q0(DM dac,DM daf,Mat *A)
   PetscFunctionReturn(0);
 }
 
+#ifdef __ve__
+#define MatSetValues_SeqAIJ_A_Private(row,col,value,addv,orow,ocol)     \
+{ \
+    if (col <= lastcol1)  low1 = 0;     \
+    else                 high1 = nrow1; \
+    lastcol1 = col;\
+    while (high1-low1 > 5) { \
+      t = (low1+high1)/2; \
+      if (rp1[t] > col) high1 = t; \
+      else              low1  = t; \
+    } \
+      for (_i=low1; _i<high1; _i++) { \
+        if (rp1[_i] > col) break; \
+        if (rp1[_i] == col) { \
+          if (addv == ADD_VALUES) { \
+            ap1[_i] += value;   \
+            /* Not sure LogFlops will slow dow the code or not */ \
+            (void)PetscLogFlops(1.0);   \
+           } \
+          else                    ap1[_i] = value; \
+          inserted = PETSC_TRUE; \
+          goto a_noinsert; \
+        } \
+      }  \
+      if (value == 0.0 && ignorezeroentries && row != col) {low1 = 0; high1 = nrow1;goto a_noinsert;} \
+      if (nonew == 1) {low1 = 0; high1 = nrow1; goto a_noinsert;}                \
+      if (nonew == -1) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Inserting a new nonzero at global row/column (%D, %D) into matrix", orow, ocol); \
+      MatSeqXAIJReallocateAIJ(A,am,1,nrow1,row,col,rmax1,aa,ai,aj,rp1,ap1,aimax,nonew,MatScalar); \
+      N = nrow1++ - 1; a->nz++; high1++; \
+      /* shift up all the later entries in this row */ \
+      ierr = PetscArraymove(rp1+_i+1,rp1+_i,N-_i+1);CHKERRQ(ierr);\
+      ierr = PetscArraymove(ap1+_i+1,ap1+_i,N-_i+1);CHKERRQ(ierr);\
+      rp1[_i] = col;  \
+      ap1[_i] = value;  \
+      A->nonzerostate++;\
+      a_noinsert: ; \
+      ailen[row] = nrow1; \
+}
+
+#define MatSetValues_SeqAIJ_B_Private(row,col,value,addv,orow,ocol) \
+  { \
+    if (col <= lastcol2) low2 = 0;                        \
+    else high2 = nrow2;                                   \
+    lastcol2 = col;                                       \
+    while (high2-low2 > 5) {                              \
+      t = (low2+high2)/2;                                 \
+      if (rp2[t] > col) high2 = t;                        \
+      else             low2  = t;                         \
+    }                                                     \
+    for (_i=low2; _i<high2; _i++) {                       \
+      if (rp2[_i] > col) break;                           \
+      if (rp2[_i] == col) {                               \
+        if (addv == ADD_VALUES) {                         \
+          ap2[_i] += value;                               \
+          (void)PetscLogFlops(1.0);                       \
+        }                                                 \
+        else                    ap2[_i] = value;          \
+        inserted = PETSC_TRUE;                            \
+        goto b_noinsert;                                  \
+      }                                                   \
+    }                                                     \
+    if (value == 0.0 && ignorezeroentries) {low2 = 0; high2 = nrow2; goto b_noinsert;} \
+    if (nonew == 1) {low2 = 0; high2 = nrow2; goto b_noinsert;}                        \
+    if (nonew == -1) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Inserting a new nonzero at global row/column (%D, %D) into matrix", orow, ocol); \
+    MatSeqXAIJReallocateAIJ(B,bm,1,nrow2,row,col,rmax2,ba,bi,bj,rp2,ap2,bimax,nonew,MatScalar); \
+    N = nrow2++ - 1; b->nz++; high2++;                    \
+    /* shift up all the later entries in this row */      \
+    ierr = PetscArraymove(rp2+_i+1,rp2+_i,N-_i+1);CHKERRQ(ierr);\
+    ierr = PetscArraymove(ap2+_i+1,ap2+_i,N-_i+1);CHKERRQ(ierr);\
+    rp2[_i] = col;                                        \
+    ap2[_i] = value;                                      \
+    B->nonzerostate++;                                    \
+    b_noinsert: ;                                         \
+    bilen[row] = nrow2;                                   \
+  }
+#endif
+
 PetscErrorCode DMCreateInterpolation_DA_2D_Q1(DM dac,DM daf,Mat *A)
 {
   PetscErrorCode         ierr;
@@ -275,10 +361,18 @@ PetscErrorCode DMCreateInterpolation_DA_2D_Q1(DM dac,DM daf,Mat *A)
   const PetscInt         *idx_c,*idx_f;
   ISLocalToGlobalMapping ltog_f,ltog_c;
   PetscInt               m_ghost,n_ghost,m_ghost_c,n_ghost_c,*dnz,*onz;
+#ifdef __ve__
+  PetscInt               row,col,i_start_ghost,j_start_ghost,mx,m_c,my,nc,ratioi,ratioj;
+#else
   PetscInt               row,col,i_start_ghost,j_start_ghost,cols[4],mx,m_c,my,nc,ratioi,ratioj;
+#endif
   PetscInt               i_c,j_c,i_start_c,j_start_c,n_c,i_start_ghost_c,j_start_ghost_c,col_shift,col_scale;
   PetscMPIInt            size_c,size_f,rank_f;
+#ifdef __ve__
+  PetscScalar            x,y;
+#else
   PetscScalar            v[4],x,y;
+#endif
   Mat                    mat;
   DMBoundaryType         bx,by;
   MatType                mattype;
@@ -314,6 +408,11 @@ PetscErrorCode DMCreateInterpolation_DA_2D_Q1(DM dac,DM daf,Mat *A)
   ierr = DMDAGetGhostCorners(dac,&i_start_ghost_c,&j_start_ghost_c,NULL,&m_ghost_c,&n_ghost_c,NULL);CHKERRQ(ierr);
   ierr = DMGetLocalToGlobalMapping(dac,&ltog_c);CHKERRQ(ierr);
   ierr = ISLocalToGlobalMappingGetBlockIndices(ltog_c,&idx_c);CHKERRQ(ierr);
+
+#ifdef __ve__
+  PetscInt cols[4*(i_start+m_f)], nc_tb[4*(i_start+m_f)], row_tb[4*(i_start+m_f)];
+  PetscScalar v[4*(i_start+m_f)];
+#endif
 
   /*
    Used for handling a coarse DMDA that lives on 1/4 the processors of the fine DMDA.
@@ -383,6 +482,640 @@ PetscErrorCode DMCreateInterpolation_DA_2D_Q1(DM dac,DM daf,Mat *A)
   /* loop over local fine grid nodes setting interpolation for those*/
   if (!NEWVERSION) {
 
+#ifdef __ve__
+   PetscBool flg, flg2;
+   ierr = MatSetValues_IsMPIAIJ(mat,&flg);
+   ierr = MatSetValues_IsSeqAIJ(mat,&flg2);
+   if (flg==PETSC_TRUE && !PetscDefined(USE_DEBUG) && !mat->was_assembled) {
+    for (j=j_start; j<j_start+n_f; j++) {
+     PetscInt jj;
+     for (jj=0;jj<4;jj++) {
+#pragma _NEC ivdep
+      for (i=i_start; i<i_start+m_f; i++) {
+       if (jj==0) {
+        /* convert to local "natural" numbering and then to PETSc global numbering */
+        row_tb[i] = idx_f[(m_ghost*(j-j_start_ghost) + (i-i_start_ghost))];
+
+        i_c = (i/ratioi);    /* coarse grid node to left of fine grid node */
+        j_c = (j/ratioj);    /* coarse grid node below fine grid node */
+
+        /*
+         Only include those interpolation points that are truly
+         nonzero. Note this is very important for final grid lines
+         in x and y directions; since they have no right/top neighbors
+         */
+        x = ((PetscReal)(i - i_c*ratioi))/((PetscReal)ratioi);
+        y = ((PetscReal)(j - j_c*ratioj))/((PetscReal)ratioj);
+
+        nc_tb[i] = 0;
+        /* one left and below; or we are right on it */
+        col      = (m_ghost_c*(j_c-j_start_ghost_c) + (i_c-i_start_ghost_c));
+        cols[nc_tb[i]*(i_start+m_f)+i] = col_shift + idx_c[col];
+        v[(nc_tb[i]++)*(i_start+m_f)+i]  = x*y - x - y + 1.0;
+        /* one right and below */
+        if (i_c*ratioi != i) {
+          cols[nc_tb[i]*(i_start+m_f)+i] = col_shift + idx_c[col+1];
+          v[(nc_tb[i]++)*(i_start+m_f)+i]  = -x*y + x;
+        }
+        /* one left and above */
+        if (j_c*ratioj != j) {
+          cols[nc_tb[i]*(i_start+m_f)+i] = col_shift + idx_c[col+m_ghost_c];
+          v[(nc_tb[i]++)*(i_start+m_f)+i]  = -x*y + y;
+        }
+        /* one right and above */
+        if (j_c*ratioj != j && i_c*ratioi != i) {
+          cols[nc_tb[i]*(i_start+m_f)+i] = col_shift + idx_c[col+(m_ghost_c+1)];
+          v[(nc_tb[i]++)*(i_start+m_f)+i]  = x*y;
+        }
+       }
+        //ierr = MatSetValues(mat,1,&row,nc,cols,v,INSERT_VALUES);CHKERRQ(ierr);
+        //PetscErrorCode MatSetValues(Mat mat,PetscInt m,const PetscInt idxm[],PetscInt n,const PetscInt idxn[],const PetscScalar v[],InsertMode addv)
+        //-- enter --
+        {
+          PetscErrorCode ierr;
+          PetscInt m;
+          const PetscInt *idxm;
+          PetscInt n;
+          const PetscInt *idxn;
+          InsertMode addv;
+        
+          m = 1;
+          idxm = row_tb;
+          n = nc_tb[i];
+          idxn = cols;
+          addv = INSERT_VALUES;
+        
+          PetscFunctionBeginHot;
+          PetscValidHeaderSpecific(mat,MAT_CLASSID,1);
+          PetscValidType(mat,1);
+          if (!m || !n) continue; /* no values to insert */
+          PetscValidIntPointer(idxm,3);
+          PetscValidIntPointer(idxn,5);
+          MatCheckPreallocated(mat,1);
+        
+          //ierr = (*mat->ops->setvalues)(mat,m,idxm,n,idxn,v,addv);CHKERRQ(ierr);
+          //PetscErrorCode MatSetValues_MPIAIJ(Mat mat,PetscInt m,const PetscInt im[],PetscInt n,const PetscInt in[],const PetscScalar v[],InsertMode addv)
+          //-- enter --
+          {
+            Mat_MPIAIJ     *aij = (Mat_MPIAIJ*)mat->data;
+            PetscScalar    value = 0.0;
+            PetscErrorCode ierr;
+            PetscInt       rstart  = mat->rmap->rstart,rend = mat->rmap->rend;
+            PetscInt       cstart      = mat->cmap->rstart,cend = mat->cmap->rend,row,col;
+            PetscBool      roworiented = aij->roworiented;
+          
+            const PetscInt *im;
+            const PetscInt *in;
+          
+            im = idxm;
+            in = idxn;
+          
+            /* Some Variables required in the macro */
+            Mat        A                    = aij->A;
+            Mat_SeqAIJ *a                   = (Mat_SeqAIJ*)A->data;
+            PetscInt   *aimax               = a->imax,*ai = a->i,*ailen = a->ilen,*aj = a->j;
+            PetscBool  ignorezeroentries    = a->ignorezeroentries;
+            Mat        B                    = aij->B;
+            Mat_SeqAIJ *b                   = (Mat_SeqAIJ*)B->data;
+            PetscInt   *bimax               = b->imax,*bi = b->i,*bilen = b->ilen,*bj = b->j,bm = aij->B->rmap->n,am = aij->A->rmap->n;
+            MatScalar  *aa,*ba;
+            /* This variable below is only for the PETSC_HAVE_VIENNACL or PETSC_HAVE_CUDA cases, but we define it in all cases because we
+             * cannot use "#if defined" inside a macro. */
+            PETSC_UNUSED PetscBool inserted = PETSC_FALSE;
+          
+            PetscInt  *rp1,*rp2,ii,nrow1,nrow2,_i,rmax1,rmax2,N,low1,high1,low2,high2,t,lastcol1,lastcol2;
+            PetscInt  nonew;
+            MatScalar *ap1,*ap2;
+          
+            PetscFunctionBegin;
+#if defined(PETSC_HAVE_DEVICE)
+            if (A->offloadmask == PETSC_OFFLOAD_GPU) {
+              const PetscScalar *dummy;
+              ierr = MatSeqAIJGetArrayRead(A,&dummy);CHKERRQ(ierr);
+              ierr = MatSeqAIJRestoreArrayRead(A,&dummy);CHKERRQ(ierr);
+            }
+            if (B->offloadmask == PETSC_OFFLOAD_GPU) {
+              const PetscScalar *dummy;
+              ierr = MatSeqAIJGetArrayRead(B,&dummy);CHKERRQ(ierr);
+              ierr = MatSeqAIJRestoreArrayRead(B,&dummy);CHKERRQ(ierr);
+            }
+#endif
+            aa = a->a;
+            ba = b->a;
+            ii=0;
+            if (ii<m) { // max(m)=max(nrow)=1
+              if (im[ii*(i_start+m_f)+i] < 0) /* continue */ ; else
+              {
+#ifdef VE_SETERRQ
+              if (PetscUnlikely(im[ii*(i_start+m_f)+i] >= mat->rmap->N)) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Row too large: row %D max %D",im[ii*(i_start+m_f)+i],mat->rmap->N-1);
+#endif
+              if (im[ii*(i_start+m_f)+i] >= rstart && im[ii*(i_start+m_f)+i] < rend) {
+                row      = im[ii*(i_start+m_f)+i] - rstart;
+                lastcol1 = -1;
+                rp1      = aj + ai[row];
+                ap1      = aa + ai[row];
+                rmax1    = aimax[row];
+                nrow1    = ailen[row];
+                low1     = 0;
+                high1    = nrow1;
+                lastcol2 = -1;
+                rp2      = bj + bi[row];
+                ap2      = ba + bi[row];
+                rmax2    = bimax[row];
+                nrow2    = bilen[row];
+                low2     = 0;
+                high2    = nrow2;
+          
+                if (jj<n) { // max(n)=max(ncol)=1
+                  if (v)  value = roworiented ? v[(ii*n+jj)*(i_start+m_f)+i] : v[(ii+jj*m)*(i_start+m_f)+i];
+                  if (ignorezeroentries && value == 0.0 && (addv == ADD_VALUES) && im[ii*(i_start+m_f)+i] != in[jj*(i_start+m_f)+i]) {
+                    ; // continue;
+                  } else
+                  if (in[jj*(i_start+m_f)+i] >= cstart && in[jj*(i_start+m_f)+i] < cend) {
+                    col   = in[jj*(i_start+m_f)+i] - cstart;
+                    nonew = a->nonew;
+
+                    //MatSetValues_SeqAIJ_A_Private(row,col,value,addv,im[ii*(i_start+m_f)+i],in[jj*(i_start+m_f)+i]);
+                    //#define MatSetValues_SeqAIJ_A_Private(row,col,value,addv,orow,ocol)
+                    { //-- enter
+                      PetscInt  orow,ocol;
+                      PetscBool bflg, gflg; // bflg means break flag, gflg means goto flag
+                      orow = im[ii*(i_start+m_f)+i];
+                      ocol = in[jj*(i_start+m_f)+i];
+                      if (col <= lastcol1)  low1 = 0;
+                      else                 high1 = nrow1;
+                      lastcol1 = col;
+                      if (high1-low1 > 5) { // max count=1
+                        t = (low1+high1)/2;
+                        if (rp1[t] > col) high1 = t;
+                        else              low1  = t;
+                      }
+                      gflg=PETSC_FALSE;
+                      _i=low1;
+                      bflg=PETSC_FALSE;
+                      if (_i<high1 && bflg==PETSC_FALSE) { // max(high1-low1+1)=1
+                        if (rp1[_i] > col) bflg = PETSC_TRUE;
+                        if (rp1[_i] == col) {
+                          if (addv == ADD_VALUES) {
+                            ap1[_i] += value;
+                            /* Not sure LogFlops will slow dow the code or not */
+                            //(void)PetscLogFlops(1.0);
+                           }
+                          else                    ap1[_i] = value;
+                          inserted = PETSC_TRUE;
+                          bflg = gflg = PETSC_TRUE;
+                        }
+                        if (bflg==PETSC_FALSE) _i++;
+                      }
+                      if (_i<high1 && bflg==PETSC_FALSE) { // max(high1-low1+1)=2
+                        if (rp1[_i] > col) bflg = PETSC_TRUE;
+                        if (rp1[_i] == col) {
+                          if (addv == ADD_VALUES) {
+                            ap1[_i] += value;
+                            /* Not sure LogFlops will slow dow the code or not */
+                            //(void)PetscLogFlops(1.0);
+                           }
+                          else                    ap1[_i] = value;
+                          inserted = PETSC_TRUE;
+                          bflg = gflg = PETSC_TRUE;
+                        }
+                        if (bflg==PETSC_FALSE) _i++;
+                      }
+                      if (_i<high1 && bflg==PETSC_FALSE) { // max(high1-low1+1)=3
+                        if (rp1[_i] > col) bflg = PETSC_TRUE;
+                        if (rp1[_i] == col) {
+                          if (addv == ADD_VALUES) {
+                            ap1[_i] += value;
+                            /* Not sure LogFlops will slow dow the code or not */
+                            //(void)PetscLogFlops(1.0);
+                           }
+                          else                    ap1[_i] = value;
+                          inserted = PETSC_TRUE;
+                          bflg = gflg = PETSC_TRUE;
+                        }
+                        if (bflg==PETSC_FALSE) _i++;
+                      }
+                      if (_i<high1 && bflg==PETSC_FALSE) { // max(high1-low1+1)=4
+                        if (rp1[_i] > col) bflg = PETSC_TRUE;
+                        if (rp1[_i] == col) {
+                          if (addv == ADD_VALUES) {
+                            ap1[_i] += value;
+                            /* Not sure LogFlops will slow dow the code or not */
+                            //(void)PetscLogFlops(1.0);
+                           }
+                          else                    ap1[_i] = value;
+                          inserted = PETSC_TRUE;
+                          bflg = gflg = PETSC_TRUE;
+                        }
+                        if (bflg==PETSC_FALSE) _i++;
+                      }
+                      if (gflg == PETSC_FALSE && value == 0.0 && ignorezeroentries && row != col) {low1 = 0; high1 = nrow1;gflg = PETSC_TRUE;}
+                      if (gflg == PETSC_FALSE && nonew == 1) {low1 = 0; high1 = nrow1; gflg = PETSC_TRUE;}
+                      if (gflg==PETSC_FALSE) {
+#ifdef VE_SETERRQ
+                        if (nonew == -1) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Inserting a new nonzero at global row/column (%D, %D) into matrix", orow, ocol);
+#endif
+                        // MatSeqXAIJReallocateAIJ(A,am,1,nrow1,row,col,rmax1,aa,ai,aj,rp1,ap1,aimax,nonew,MatScalar);
+                        // if nrow1<=rmax1 do nothing
+                        N = nrow1++ - 1; a->nz++; high1++;
+                        /* shift up all the later entries in this row */
+                        //ierr = PetscArraymove(rp1+_i+1,rp1+_i,N-_i+1);CHKERRQ(ierr);
+                        //ierr = PetscArraymove(ap1+_i+1,ap1+_i,N-_i+1);CHKERRQ(ierr);
+                        rp1[_i] = col;
+                        ap1[_i] = value;
+                        A->nonzerostate++;
+                      }
+                      //a_noinsert: ;
+                      ailen[row] = nrow1;
+                    } //-- exit --
+#if defined(PETSC_HAVE_DEVICE)
+                    if (A->offloadmask != PETSC_OFFLOAD_UNALLOCATED && inserted) A->offloadmask = PETSC_OFFLOAD_CPU;
+#endif
+                  } else if (in[jj*(i_start+m_f)+i] < 0) {;} // continue
+#ifdef VE_SETERRQ
+                  else if (in[jj*(i_start+m_f)+i] >= mat->cmap->N) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Column too large: col %D max %D",in[jj*(i_start+m_f)+i],mat->cmap->N-1);
+#endif
+                  else {
+                    col = in[jj*(i_start+m_f)+i];
+                    nonew = b->nonew;
+                    //MatSetValues_SeqAIJ_B_Private(row,col,value,addv,im[ii*(i_start+m_f)+i],in[jj*(i_start+m_f)+i]);
+                    //#define MatSetValues_SeqAIJ_B_Private(row,col,value,addv,orow,ocol)
+                    { //-- enter --
+                      PetscInt  orow,ocol;
+                      PetscBool bflg, gflg; // bflg means break flag, gflg means goto flag
+                      orow = im[ii*(i_start+m_f)+i];
+                      ocol = in[jj*(i_start+m_f)+i];
+
+                      if (col <= lastcol2) low2 = 0;
+                      else high2 = nrow2;
+                      lastcol2 = col;
+                      if (high2-low2 > 5) { // max count=1
+                        t = (low2+high2)/2;
+                        if (rp2[t] > col) high2 = t;
+                        else             low2  = t;
+                      }
+                      gflg = PETSC_FALSE;
+                      _i=low2;
+                      bflg = PETSC_FALSE;
+                      if (_i<high2 && bflg==PETSC_FALSE) { // max(high2-low2+1)=1
+                        if (rp2[_i] > col) bflg = PETSC_TRUE;
+                        if (rp2[_i] == col) {
+                          if (addv == ADD_VALUES) {
+                            ap2[_i] += value;
+                            //(void)PetscLogFlops(1.0);
+                          }
+                          else                    ap2[_i] = value;
+                          inserted = PETSC_TRUE;
+                          bflg = gflg = PETSC_FALSE;
+                        }
+                        if (bflg==PETSC_FALSE) _i++;
+                      }
+                      if (_i<high2 && bflg==PETSC_FALSE) { // max(high2-low2+1)=2
+                        if (rp2[_i] > col) bflg = PETSC_TRUE;
+                        if (rp2[_i] == col) {
+                          if (addv == ADD_VALUES) {
+                            ap2[_i] += value;
+                            //(void)PetscLogFlops(1.0);
+                          }
+                          else                    ap2[_i] = value;
+                          inserted = PETSC_TRUE;
+                          bflg = gflg = PETSC_FALSE;
+                        }
+                        if (bflg==PETSC_FALSE) _i++;
+                      }
+                      if (_i<high2 && bflg==PETSC_FALSE) { // max(high2-low2+1)=3
+                        if (rp2[_i] > col) bflg = PETSC_TRUE;
+                        if (rp2[_i] == col) {
+                          if (addv == ADD_VALUES) {
+                            ap2[_i] += value;
+                            //(void)PetscLogFlops(1.0);
+                          }
+                          else                    ap2[_i] = value;
+                          inserted = PETSC_TRUE;
+                          bflg = gflg = PETSC_FALSE;
+                        }
+                        if (bflg==PETSC_FALSE) _i++;
+                      }
+                      if (gflg == PETSC_FALSE && value == 0.0 && ignorezeroentries) {low2 = 0; high2 = nrow2;gflg = PETSC_TRUE;}
+                      if (gflg == PETSC_FALSE && nonew == 1) {low2 = 0; high2 = nrow2; gflg = PETSC_TRUE;}
+                      if (gflg == PETSC_FALSE ) {
+#ifdef VE_SETERRQ
+                        if (nonew == -1) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Inserting a new nonzero at global row/column (%D, %D) into matrix", orow, ocol);
+#endif
+                        // MatSeqXAIJReallocateAIJ(B,bm,1,nrow2,row,col,rmax2,ba,bi,bj,rp2,ap2,bimax,nonew,MatScalar);
+                        // if nrow2<=rmax2 do nothing
+                        N = nrow2++ - 1; b->nz++; high2++;
+                        /* shift up all the later entries in this row */
+                        //ierr = PetscArraymove(rp2+_i+1,rp2+_i,N-_i+1);CHKERRQ(ierr);
+                        //ierr = PetscArraymove(ap2+_i+1,ap2+_i,N-_i+1);CHKERRQ(ierr);
+                        rp2[_i] = col;
+                        ap2[_i] = value;
+                        B->nonzerostate++;
+                      }
+                      //b_noinsert: ;
+                      bilen[row] = nrow2;
+                    } //-- exit --
+#if defined(PETSC_HAVE_DEVICE)
+                    if (B->offloadmask != PETSC_OFFLOAD_UNALLOCATED && inserted) B->offloadmask = PETSC_OFFLOAD_CPU;
+#endif
+                  }
+                }
+              } else {
+#ifdef VE_SETERRQ
+                if (mat->nooffprocentries) SETERRQ1(PETSC_COMM_SELF,PETSC_ERR_ARG_WRONG,"Setting off process row %D even though MatSetOption(,MAT_NO_OFF_PROC_ENTRIES,PETSC_TRUE) was set",im[i*(i_start+m_f)+j]);
+#endif
+              }
+              }
+              ii++;
+            }
+            ierr = 0;
+            //PetscFunctionReturn(0);
+          }
+          //-- exit --
+          //CHKERRQ(ierr);
+          ierr = 0;
+          //PetscFunctionReturn(0);
+        }
+        ierr = 0;CHKERRQ(ierr);
+        //-- exit --
+      }
+     }
+    }
+   } else if (flg2==PETSC_TRUE && !PetscDefined(USE_DEBUG) && !mat->was_assembled) {
+    for (j=j_start; j<j_start+n_f; j++) {
+      PetscInt k,l;
+     for (l=0; l<5; l++) {
+#pragma _NEC ivdep
+      for (i=i_start; i<i_start+m_f; i++) {
+       if (l==0) {
+        /* convert to local "natural" numbering and then to PETSc global numbering */
+        row_tb[i] = idx_f[(m_ghost*(j-j_start_ghost) + (i-i_start_ghost))];
+
+        i_c = (i/ratioi);    /* coarse grid node to left of fine grid node */
+        j_c = (j/ratioj);    /* coarse grid node below fine grid node */
+
+        /*
+         Only include those interpolation points that are truly
+         nonzero. Note this is very important for final grid lines
+         in x and y directions; since they have no right/top neighbors
+         */
+        x = ((PetscReal)(i - i_c*ratioi))/((PetscReal)ratioi);
+        y = ((PetscReal)(j - j_c*ratioj))/((PetscReal)ratioj);
+
+        nc_tb[i] = 0;
+        /* one left and below; or we are right on it */
+        col      = (m_ghost_c*(j_c-j_start_ghost_c) + (i_c-i_start_ghost_c));
+        cols[nc_tb[i]*(i_start+m_f)+i] = col_shift + idx_c[col];
+        v[(nc_tb[i]++)*(i_start+m_f)+i]  = x*y - x - y + 1.0;
+        /* one right and below */
+        if (i_c*ratioi != i) {
+          cols[nc_tb[i]*(i_start+m_f)+i] = col_shift + idx_c[col+1];
+          v[(nc_tb[i]++)*(i_start+m_f)+i]  = -x*y + x;
+        }
+        /* one left and above */
+        if (j_c*ratioj != j) {
+          cols[nc_tb[i]*(i_start+m_f)+i] = col_shift + idx_c[col+m_ghost_c];
+          v[(nc_tb[i]++)*(i_start+m_f)+i]  = -x*y + y;
+        }
+        /* one right and above */
+        if (j_c*ratioj != j && i_c*ratioi != i) {
+          cols[nc_tb[i]*(i_start+m_f)+i] = col_shift + idx_c[col+(m_ghost_c+1)];
+          v[(nc_tb[i]++)*(i_start+m_f)+i]  = x*y;
+        }
+       }
+        //ierr = MatSetValues(mat,1,&row,nc,cols,v,INSERT_VALUES);CHKERRQ(ierr);
+        //PetscErrorCode MatSetValues(Mat mat,PetscInt m,const PetscInt idxm[],PetscInt n,const PetscInt idxn[],const PetscScalar v[],InsertMode addv)
+        //-- enter --
+        {
+          PetscErrorCode ierr;
+          PetscInt m;
+          const PetscInt *idxm;
+          PetscInt n;
+          const PetscInt *idxn;
+          InsertMode addv;
+        
+          m = 1;
+          idxm = row_tb;
+          n = nc_tb[i];
+          idxn = cols;
+          addv = INSERT_VALUES;
+        
+          PetscFunctionBeginHot;
+          PetscValidHeaderSpecific(mat,MAT_CLASSID,1);
+          PetscValidType(mat,1);
+          if (!m || !n) continue; /* no values to insert */
+          PetscValidIntPointer(idxm,3);
+          PetscValidIntPointer(idxn,5);
+          MatCheckPreallocated(mat,1);
+        
+          //ierr = (*mat->ops->setvalues)(mat,m,idxm,n,idxn,v,addv);CHKERRQ(ierr);
+          //PetscErrorCode MatSetValues_SeqAIJ(Mat A,PetscInt m,const PetscInt im[],PetscInt n,const PetscInt in[],const PetscScalar v[],InsertMode is)
+          //-- enter --
+          {
+            Mat A;
+            A = mat;
+            Mat_SeqAIJ     *a = (Mat_SeqAIJ*)A->data;
+            PetscInt       *rp,low,high,t,ii,row,nrow,col,rmax,N;
+            PetscInt       *imax = a->imax,*ai = a->i,*ailen = a->ilen;
+            PetscErrorCode ierr;
+            PetscInt       *aj = a->j,nonew = a->nonew,lastcol = -1;
+            MatScalar      *ap=NULL,value=0.0,*aa;
+            PetscBool      ignorezeroentries = a->ignorezeroentries;
+            PetscBool      roworiented       = a->roworiented;
+#if defined(PETSC_HAVE_DEVICE)
+            PetscBool      inserted          = PETSC_FALSE;
+#endif
+            const PetscInt *im;
+            const PetscInt *in;
+            InsertMode is;
+
+            im = idxm;
+            in = idxn;
+            is = addv;
+
+            PetscFunctionBegin;
+#if defined(PETSC_HAVE_DEVICE)
+            if (A->offloadmask == PETSC_OFFLOAD_GPU) {
+              const PetscScalar *dummy;
+              ierr = MatSeqAIJGetArrayRead(A,&dummy);CHKERRQ(ierr);
+              ierr = MatSeqAIJRestoreArrayRead(A,&dummy);CHKERRQ(ierr);
+            }
+#endif
+            aa = a->a;
+            k=0;
+            if (k<m) { /* loop over added rows */ // max(m)=1
+              row = im[k*(i_start+m_f)+i];
+             if (row >= 0) { // if row<0 continue;
+#ifdef VE_SETERRQ
+              if (PetscUnlikelyDebug(row >= A->rmap->n)) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Row too large: row %D max %D",row,A->rmap->n-1);
+#endif
+              rp   = aj + ai[row];
+              if (!A->structure_only) ap = aa + ai[row];
+              rmax = imax[row]; nrow = ailen[row];
+              low  = 0;
+              high = nrow;
+              if (l<n) { /* loop over added columns */ // max(n)=1
+               PetscBool bflg, gflg; // bflg means break flag, gflg means goto flag
+               if (in[l*(i_start+m_f)+i] >= 0) { // if in[] < 0 continue;
+#ifdef VE_SETERRQ
+                if (PetscUnlikelyDebug(in[l*(i_start+m_f)+i] >= A->cmap->n)) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Column too large: col %D max %D",in[l*(i_start+m_f)+i],A->cmap->n-1);
+#endif
+                col = in[l*(i_start+m_f)+i];
+                if (v && !A->structure_only) value = roworiented ? v[(l + k*n)*(i_start+m_f)+i] : v[(k + l*m)*(i_start+m_f)+i];
+                if (!A->structure_only && value == 0.0 && ignorezeroentries && is == ADD_VALUES && row != col) continue;
+
+                if (col <= lastcol) low = 0;
+                else high = nrow;
+                lastcol = col;
+                if (high-low > 5) { // while num=1
+                  t = (low+high)/2;
+                  if (rp[t] > col) high = t;
+                  else low = t;
+                }
+                gflg=PETSC_FALSE;
+                ii=low;
+                bflg=PETSC_FALSE;
+                if (ii<high && bflg==PETSC_FALSE) { // max(high-low)=1
+                  if (rp[ii] > col) bflg = PETSC_TRUE;
+                  if (rp[ii] == col) {
+                    if (!A->structure_only) {
+                      if (is == ADD_VALUES) {
+                        ap[ii] += value;
+                        //(void)PetscLogFlops(1.0);
+                      }
+                      else ap[ii] = value;
+#if defined(PETSC_HAVE_DEVICE)
+                      inserted = PETSC_TRUE;
+#endif
+                    }
+                    low = ii + 1;
+                    bflg = gflg = PETSC_TRUE;
+                  }
+                  ii++;
+                }
+                if (ii<high && bflg==PETSC_FALSE) { // max(high-low)=2
+                  if (rp[ii] > col) bflg = PETSC_TRUE;
+                  if (rp[ii] == col) {
+                    if (!A->structure_only) {
+                      if (is == ADD_VALUES) {
+                        ap[ii] += value;
+                        //(void)PetscLogFlops(1.0);
+                      }
+                      else ap[ii] = value;
+#if defined(PETSC_HAVE_DEVICE)
+                      inserted = PETSC_TRUE;
+#endif
+                    }
+                    low = ii + 1;
+                    bflg = gflg = PETSC_TRUE;
+                  }
+                  ii++;
+                }
+                if (ii<high && bflg==PETSC_FALSE) { // max(high-low)=3
+                  if (rp[ii] > col) bflg = PETSC_TRUE;
+                  if (rp[ii] == col) {
+                    if (!A->structure_only) {
+                      if (is == ADD_VALUES) {
+                        ap[ii] += value;
+                        //(void)PetscLogFlops(1.0);
+                      }
+                      else ap[ii] = value;
+#if defined(PETSC_HAVE_DEVICE)
+                      inserted = PETSC_TRUE;
+#endif
+                    }
+                    low = ii + 1;
+                    bflg = gflg = PETSC_TRUE;
+                  }
+                  ii++;
+                }
+                if (ii<high && bflg==PETSC_FALSE) { // max(high-low)=4
+                  if (rp[ii] > col) bflg = PETSC_TRUE;
+                  if (rp[ii] == col) {
+                    if (!A->structure_only) {
+                      if (is == ADD_VALUES) {
+                        ap[ii] += value;
+                        //(void)PetscLogFlops(1.0);
+                      }
+                      else ap[ii] = value;
+#if defined(PETSC_HAVE_DEVICE)
+                      inserted = PETSC_TRUE;
+#endif
+                    }
+                    low = ii + 1;
+                    bflg = gflg = PETSC_TRUE;
+                  }
+                  ii++;
+                }
+                if (ii<high && bflg==PETSC_FALSE) { // max(high-low)=5
+                  if (rp[ii] > col) bflg = PETSC_TRUE;
+                  if (rp[ii] == col) {
+                    if (!A->structure_only) {
+                      if (is == ADD_VALUES) {
+                        ap[ii] += value;
+                        //(void)PetscLogFlops(1.0);
+                      }
+                      else ap[ii] = value;
+#if defined(PETSC_HAVE_DEVICE)
+                      inserted = PETSC_TRUE;
+#endif
+                    }
+                    low = ii + 1;
+                    bflg = gflg = PETSC_TRUE;
+                  }
+                  ii++;
+                }
+                if (value == 0.0 && ignorezeroentries && row != col) gflg = PETSC_TRUE;
+                if (nonew == 1) gflg = PETSC_TRUE;
+               if (gflg==PETSC_FALSE) {
+#ifdef VE_SETERRQ
+                if (nonew == -1) SETERRQ2(PETSC_COMM_SELF,PETSC_ERR_ARG_OUTOFRANGE,"Inserting a new nonzero at (%D,%D) in the matrix",row,col);
+#endif
+                if (A->structure_only) {
+                  //MatSeqXAIJReallocateAIJ_structure_only(A,A->rmap->n,1,nrow,row,col,rmax,ai,aj,rp,imax,nonew,MatScalar);
+                  // if nrow<rmax do nothing
+                } else {
+                  //MatSeqXAIJReallocateAIJ(A,A->rmap->n,1,nrow,row,col,rmax,aa,ai,aj,rp,ap,imax,nonew,MatScalar);
+                  // if nrow<rmax do nothing
+                }
+                N = nrow++ - 1; a->nz++; high++;
+                /* shift up all the later entries in this row */
+                //ierr  = PetscArraymove(rp+ii+1,rp+ii,N-ii+1);CHKERRQ(ierr);
+                // if N-ii+1>0 do nothing
+                rp[ii] = col;
+                if (!A->structure_only) {
+                  //ierr  = PetscArraymove(ap+ii+1,ap+ii,N-ii+1);CHKERRQ(ierr);
+                  // if N-ii+1>0 do nothing
+                  ap[ii] = value;
+                }
+                low = ii + 1;
+                A->nonzerostate++;
+#if defined(PETSC_HAVE_DEVICE)
+                inserted = PETSC_TRUE;
+#endif
+               }
+//noinsert:;
+               }
+              }
+              ailen[row] = nrow;
+             }
+              k++;
+            }
+#if defined(PETSC_HAVE_DEVICE)
+            if (A->offloadmask != PETSC_OFFLOAD_UNALLOCATED && inserted) A->offloadmask = PETSC_OFFLOAD_CPU;
+#endif
+            //PetscFunctionReturn(0);
+          }
+          ierr = 0;
+          //-- exit --
+          //PetscFunctionReturn(0);
+        }
+        ierr = 0; CHKERRQ(ierr);
+        //-- exit --
+      } // i-loop
+     } // l-loop
+    } // j-loop
+   } else {
     for (j=j_start; j<j_start+n_f; j++) {
       for (i=i_start; i<i_start+m_f; i++) {
         /* convert to local "natural" numbering and then to PETSc global numbering */
@@ -422,6 +1155,48 @@ PetscErrorCode DMCreateInterpolation_DA_2D_Q1(DM dac,DM daf,Mat *A)
         ierr = MatSetValues(mat,1,&row,nc,cols,v,INSERT_VALUES);CHKERRQ(ierr);
       }
     }
+   }
+#else
+    for (j=j_start; j<j_start+n_f; j++) {
+      for (i=i_start; i<i_start+m_f; i++) {
+        /* convert to local "natural" numbering and then to PETSc global numbering */
+        row = idx_f[(m_ghost*(j-j_start_ghost) + (i-i_start_ghost))];
+
+        i_c = (i/ratioi);    /* coarse grid node to left of fine grid node */
+        j_c = (j/ratioj);    /* coarse grid node below fine grid node */
+
+        /*
+         Only include those interpolation points that are truly
+         nonzero. Note this is very important for final grid lines
+         in x and y directions; since they have no right/top neighbors
+         */
+        x = ((PetscReal)(i - i_c*ratioi))/((PetscReal)ratioi);
+        y = ((PetscReal)(j - j_c*ratioj))/((PetscReal)ratioj);
+
+        nc = 0;
+        /* one left and below; or we are right on it */
+        col      = (m_ghost_c*(j_c-j_start_ghost_c) + (i_c-i_start_ghost_c));
+        cols[nc] = col_shift + idx_c[col];
+        v[nc++]  = x*y - x - y + 1.0;
+        /* one right and below */
+        if (i_c*ratioi != i) {
+          cols[nc] = col_shift + idx_c[col+1];
+          v[nc++]  = -x*y + x;
+        }
+        /* one left and above */
+        if (j_c*ratioj != j) {
+          cols[nc] = col_shift + idx_c[col+m_ghost_c];
+          v[nc++]  = -x*y + y;
+        }
+        /* one right and above */
+        if (j_c*ratioj != j && i_c*ratioi != i) {
+          cols[nc] = col_shift + idx_c[col+(m_ghost_c+1)];
+          v[nc++]  = x*y;
+        }
+        ierr = MatSetValues(mat,1,&row,nc,cols,v,INSERT_VALUES);CHKERRQ(ierr);
+      }
+    }
+#endif
 
   } else {
     PetscScalar Ni[4];

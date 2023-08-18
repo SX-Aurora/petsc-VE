@@ -535,6 +535,18 @@ PetscErrorCode MatSetValues_MPIAIJ(Mat mat,PetscInt m,const PetscInt im[],PetscI
   PetscFunctionReturn(0);
 }
 
+#ifdef __ve__
+PetscErrorCode MatSetValues_IsMPIAIJ(Mat mat,PetscBool *flg)
+{
+  if (mat->ops->setvalues == MatSetValues_MPIAIJ) {
+    *flg = PETSC_TRUE;
+  } else {
+    *flg = PETSC_FALSE;
+  }
+  PetscFunctionReturn(0);
+}
+#endif
+
 /*
     This function sets the j and ilen arrays (of the diagonal and off-diagonal part) of an MPIAIJ-matrix.
     The values in mat_i have to be sorted and the values in mat_j have to be sorted for each row (CSR-like).

@@ -521,10 +521,22 @@ PetscErrorCode MatSetValues_SeqAIJ(Mat A,PetscInt m,const PetscInt im[],PetscInt
       }
       N = nrow++ - 1; a->nz++; high++;
       /* shift up all the later entries in this row */
+#ifdef __ve__
+ if(N-i+1 > 0) {
+#endif
       ierr  = PetscArraymove(rp+i+1,rp+i,N-i+1);CHKERRQ(ierr);
+#ifdef __ve__
+ }
+#endif
       rp[i] = col;
       if (!A->structure_only) {
+#ifdef __ve__
+ if(N-i+1 > 0) {
+#endif
         ierr  = PetscArraymove(ap+i+1,ap+i,N-i+1);CHKERRQ(ierr);
+#ifdef __ve__
+ }
+#endif
         ap[i] = value;
       }
       low = i + 1;
@@ -1158,6 +1170,10 @@ PetscErrorCode MatView_SeqAIJ(Mat A,PetscViewer viewer)
   PetscFunctionReturn(0);
 }
 
+#ifdef __ve__
+#define PetscArraymove_new(str1,str2,cnt) ((sizeof(*(str1)) != sizeof(*(str2))) || memmove(str1,str2,(size_t)(cnt)*sizeof(*(str1))),0)
+#endif
+
 PetscErrorCode MatAssemblyEnd_SeqAIJ(Mat A,MatAssemblyType mode)
 {
   Mat_SeqAIJ     *a = (Mat_SeqAIJ*)A->data;
@@ -1185,9 +1201,17 @@ PetscErrorCode MatAssemblyEnd_SeqAIJ(Mat A,MatAssemblyType mode)
       ip = aj + ai[i];
       ap = aa + ai[i];
       N  = ailen[i];
+#ifdef __ve__
+      ierr = PetscArraymove_new(ip-fshift,ip,N);CHKERRQ(ierr);
+#else
       ierr = PetscArraymove(ip-fshift,ip,N);CHKERRQ(ierr);
+#endif
       if (!A->structure_only) {
+#ifdef __ve__
+        ierr = PetscArraymove_new(ap-fshift,ap,N);CHKERRQ(ierr);
+#else
         ierr = PetscArraymove(ap-fshift,ap,N);CHKERRQ(ierr);
+#endif
       }
     }
     ai[i] = ai[i-1] + ailen[i-1];
@@ -1460,6 +1484,9 @@ PetscErrorCode MatMultTransposeAdd_SeqAIJ(Mat A,Vec xx,Vec zz,Vec yy)
   const MatScalar   *v;
   PetscScalar       alpha;
   PetscInt          n,i,j;
+#ifdef __ve__
+  PetscInt          iskip,nskip;
+#endif
   const PetscInt    *idx,*ii,*ridx=NULL;
   Mat_CompressedRow cprow    = a->compressedrow;
   PetscBool         usecprow = cprow.use;
@@ -1480,6 +1507,28 @@ PetscErrorCode MatMultTransposeAdd_SeqAIJ(Mat A,Vec xx,Vec zz,Vec yy)
   } else {
     ii = a->i;
   }
+#ifdef __ve__
+  nskip = 137; // choose from prime number
+  if (nskip > m) nskip = m;
+  for (iskip=0; iskip<nskip; iskip++) {
+#pragma _NEC gather_reorder
+    for (i=iskip; i<m; i+=nskip) {
+      idx = a->j + ii[i];
+      v   = a->a + ii[i];
+      n   = ii[i+1] - ii[i];
+      if (usecprow) {
+        alpha = x[ridx[i]];
+      } else {
+        alpha = x[i];
+      }
+      j=0;
+      if(j<n) y[idx[j]] += alpha*v[j]; j++;
+      if(j<n) y[idx[j]] += alpha*v[j]; j++;
+      if(j<n) y[idx[j]] += alpha*v[j]; j++;
+      if(j<n) y[idx[j]] += alpha*v[j];
+    }
+  }
+#else
   for (i=0; i<m; i++) {
     idx = a->j + ii[i];
     v   = a->a + ii[i];
@@ -1491,6 +1540,7 @@ PetscErrorCode MatMultTransposeAdd_SeqAIJ(Mat A,Vec xx,Vec zz,Vec yy)
     }
     for (j=0; j<n; j++) y[idx[j]] += alpha*v[j];
   }
+#endif
 #endif
   ierr = PetscLogFlops(2.0*a->nz);CHKERRQ(ierr);
   ierr = VecRestoreArrayRead(xx,&x);CHKERRQ(ierr);
@@ -1555,6 +1605,22 @@ PetscErrorCode MatMult_SeqAIJ(Mat A,Vec xx,Vec yy)
     aa   = a->a;
     fortranmultaij_(&m,x,ii,aj,aa,y);
 #else
+#ifdef __ve__
+    for (i=0; i<m; i++) {
+      n           = ii[i+1] - ii[i];
+      aj          = a->j + ii[i];
+      aa          = a->a + ii[i];
+      sum         = 0.0;
+      PetscInt __i;
+      __i=0;
+      if (__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      if (__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      if (__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      if (__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      if (__i<n) {sum += aa[__i] * x[aj[__i]];}
+      y[i] = sum;
+    }
+#else
     for (i=0; i<m; i++) {
       n           = ii[i+1] - ii[i];
       aj          = a->j + ii[i];
@@ -1563,6 +1629,7 @@ PetscErrorCode MatMult_SeqAIJ(Mat A,Vec xx,Vec yy)
       PetscSparseDensePlusDot(sum,x,aa,aj,n);
       y[i] = sum;
     }
+#endif
 #endif
   }
   ierr = PetscLogFlops(2.0*a->nz - a->nonzerorowcnt);CHKERRQ(ierr);
@@ -1697,6 +1764,24 @@ PetscErrorCode MatMultAdd_SeqAIJ(Mat A,Vec xx,Vec yy,Vec zz)
     m    = a->compressedrow.nrows;
     ii   = a->compressedrow.i;
     ridx = a->compressedrow.rindex;
+#ifdef __ve__
+    for (i=0; i<m; i++) {
+      n   = ii[i+1] - ii[i];
+      aj  = a->j + ii[i];
+      aa  = a->a + ii[i];
+      sum = y[*ridx];
+      //PetscSparseDensePlusDot(sum,x,aa,aj,n);
+      //#define PetscSparseDensePlusDot(sum,r,xv,xi,nnz) { \
+      //    PetscInt __i; \
+      //    for (__i=0; __i<nnz; __i++) sum += xv[__i] * r[xi[__i]];}
+      PetscInt __i;
+      __i=0;
+      if(__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      if(__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      if(__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      z[*ridx++] = sum;
+    }
+#else
     for (i=0; i<m; i++) {
       n   = ii[i+1] - ii[i];
       aj  = a->j + ii[i];
@@ -1705,12 +1790,32 @@ PetscErrorCode MatMultAdd_SeqAIJ(Mat A,Vec xx,Vec yy,Vec zz)
       PetscSparseDensePlusDot(sum,x,aa,aj,n);
       z[*ridx++] = sum;
     }
+#endif
   } else { /* do not use compressed row format */
     ii = a->i;
 #if defined(PETSC_USE_FORTRAN_KERNEL_MULTADDAIJ)
     aj = a->j;
     aa = a->a;
     fortranmultaddaij_(&m,x,ii,aj,aa,y,z);
+#else
+#ifdef __ve__
+    for (i=0; i<m; i++) {
+      n   = ii[i+1] - ii[i];
+      aj  = a->j + ii[i];
+      aa  = a->a + ii[i];
+      sum = y[i];
+      //PetscSparseDensePlusDot(sum,x,aa,aj,n);
+      //#define PetscSparseDensePlusDot(sum,r,xv,xi,nnz) { \
+      //    PetscInt __i; \
+      //    for (__i=0; __i<nnz; __i++) sum += xv[__i] * r[xi[__i]];}
+      PetscInt __i;
+      __i=0;
+      if(__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      if(__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      if(__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      if(__i<n) {sum += aa[__i] * x[aj[__i]];__i++;}
+      z[i] = sum;
+    }
 #else
     for (i=0; i<m; i++) {
       n   = ii[i+1] - ii[i];
@@ -1720,6 +1825,7 @@ PetscErrorCode MatMultAdd_SeqAIJ(Mat A,Vec xx,Vec yy,Vec zz)
       PetscSparseDensePlusDot(sum,x,aa,aj,n);
       z[i] = sum;
     }
+#endif
 #endif
   }
   ierr = PetscLogFlops(2.0*a->nz);CHKERRQ(ierr);
@@ -1736,12 +1842,57 @@ PetscErrorCode MatMarkDiagonal_SeqAIJ(Mat A)
   Mat_SeqAIJ     *a = (Mat_SeqAIJ*)A->data;
   PetscErrorCode ierr;
   PetscInt       i,j,m = A->rmap->n;
+#ifdef __ve__
+  PetscBool      bflag; // break flag
+#endif
 
   PetscFunctionBegin;
   if (!a->diag) {
     ierr = PetscMalloc1(m,&a->diag);CHKERRQ(ierr);
     ierr = PetscLogObjectMemory((PetscObject)A, m*sizeof(PetscInt));CHKERRQ(ierr);
   }
+#ifdef __ve__
+  for (i=0; i<A->rmap->n; i++) {
+    a->diag[i] = a->i[i+1];
+    j=a->i[i];
+    bflag = PETSC_FALSE;
+    if (bflag==PETSC_FALSE && j<a->i[i+1]) { // max(a->i[i+1]-a->i[i])=1
+      if (a->j[j] == i) {
+        a->diag[i] = j;
+        bflag = PETSC_TRUE;
+      }
+      j++;
+    }
+    if (bflag==PETSC_FALSE && j<a->i[i+1]) { // max(a->i[i+1]-a->i[i])=2
+      if (a->j[j] == i) {
+        a->diag[i] = j;
+        bflag = PETSC_TRUE;
+      }
+      j++;
+    }
+    if (bflag==PETSC_FALSE && j<a->i[i+1]) { // max(a->i[i+1]-a->i[i])=3
+      if (a->j[j] == i) {
+        a->diag[i] = j;
+        bflag = PETSC_TRUE;
+      }
+      j++;
+    }
+    if (bflag==PETSC_FALSE && j<a->i[i+1]) { // max(a->i[i+1]-a->i[i])=4
+      if (a->j[j] == i) {
+        a->diag[i] = j;
+        bflag = PETSC_TRUE;
+      }
+      j++;
+    }
+    if (bflag==PETSC_FALSE && j<a->i[i+1]) { // max(a->i[i+1]-a->i[i])=5
+      if (a->j[j] == i) {
+        a->diag[i] = j;
+        bflag = PETSC_TRUE;
+      }
+      j++;
+    }
+  }
+#else
   for (i=0; i<A->rmap->n; i++) {
     a->diag[i] = a->i[i+1];
     for (j=a->i[i]; j<a->i[i+1]; j++) {
@@ -1751,6 +1902,7 @@ PetscErrorCode MatMarkDiagonal_SeqAIJ(Mat A)
       }
     }
   }
+#endif
   PetscFunctionReturn(0);
 }
 
@@ -2076,6 +2228,145 @@ PetscErrorCode MatSOR_SeqAIJ(Mat A,Vec bb,PetscReal omega,MatSORType flag,PetscR
   }
   if (flag & SOR_ZERO_INITIAL_GUESS) {
     if (flag & SOR_FORWARD_SWEEP || flag & SOR_LOCAL_FORWARD_SWEEP) {
+#ifdef __ve__
+      PetscInt _idx0bef, _nstep, nn, nsta, nend, myrank, size;
+      MPI_Comm_rank(MPI_COMM_WORLD,&myrank);
+      MPI_Comm_size(MPI_COMM_WORLD,&size);
+      _idx0bef = -1;
+      for (i=1; i<m; i++) {
+        idx = a->j + a->i[i];
+        if (idx[0] < _idx0bef) {
+          break;
+        }
+        _idx0bef = idx[0];
+      }
+      _nstep = i - 1;
+      if (_nstep%2 == 0 && size > 4) {
+        PetscInt m2 = m+m/_nstep, _nstep2;
+        PetscScalar x_[m2], t_[m2], b_[m2], v_[2][m2], idiag_[m2];
+        PetscInt itrn[m2], idx_[2][m2], n_[m2], ai_[m2];
+        _nstep2 = _nstep + 1;
+        for (i=0; i<m; i++) {
+          itrn[i] = i+i/_nstep;
+        }
+        for (i=0; i<m2; i++) {
+          ai_[i] = a->i[i-i/_nstep2];
+          n_[i] = diag[i-i/_nstep2] - ai_[i];
+          idx_[0][i] = itrn[(a->j + ai_[i])[0]];
+          idx_[1][i] = itrn[(a->j + ai_[i])[1]];
+          v_[0][i] = (a->a + ai_[i])[0];
+          v_[1][i] = (a->a + ai_[i])[1];
+          idiag_[i] = idiag[i-i/_nstep2];
+          x_[i] = 0.0;
+          t_[i] = t[i-i/_nstep2];
+          b_[i] = b[i-i/_nstep2];
+        }
+#pragma _NEC novector
+        for (nn=1; nn<=_nstep+1; nn++) {
+          nsta = nn - 1 + (nn-1)/_nstep;
+          nend = nsta + _nstep2 * (nn - 1);
+          if (m2<=nend) {
+            nend = m2 - 1;
+          }
+          for (i=nsta; i<=nend; i+=_nstep2) {
+            sum = b_[i];
+            PetscInt __i;
+            __i=0;
+            if (__i<n_[i]) {sum -= v_[__i][i] * x_[idx_[__i][i]];__i++;}
+            if (__i<n_[i]) {sum -= v_[__i][i] * x_[idx_[__i][i]];}
+            t_[i] = sum;
+          }
+          for (i=nsta; i<=nend; i+=_nstep2) {
+            x_[i] = t_[i]*idiag_[i];
+          }
+        }
+#pragma _NEC novector
+        for (nn=1; nn<=_nstep; nn++) {
+          nsta = _nstep2 * (1 + nn) + nn;
+          for (i=nsta; i<m2; i+=_nstep2) {
+            sum = b_[i];
+            PetscInt __i;
+            __i=0;
+            if (__i<n_[i]) {sum -= v_[__i][i] * x_[idx_[__i][i]];__i++;}
+            if (__i<n_[i]) {sum -= v_[__i][i] * x_[idx_[__i][i]];}
+            t_[i] = sum;
+          }
+          for (i=nsta; i<m2; i+=_nstep2) {
+            x_[i] = t_[i]*idiag_[i];
+          }
+        }
+        for (i=0; i<m; i++) {
+          t[i] = t_[itrn[i]];
+        }
+      } else {
+#pragma _NEC novector
+        for (nn=1; nn<=_nstep+1; nn++) {
+          nsta = nn - 1;
+          nend = nsta + _nstep * (nn - 1);
+          if (m<=nend) {
+            nend = m - 1;
+          }
+          for (i=nsta; i<=nend; i+=_nstep) {
+            n   = diag[i] - a->i[i];
+            idx = a->j + a->i[i];
+            v   = a->a + a->i[i];
+            sum = b[i];
+            PetscInt __i;
+            __i=0;
+            if (__i<n) {sum -= v[__i] * x[idx[__i]];__i++;}
+            if (__i<n) {sum -= v[__i] * x[idx[__i]];}
+            t[i] = sum;
+          }
+          for (i=nsta; i<=nend; i+=_nstep) {
+            x[i] = t[i]*idiag[i];
+          }
+        }
+        if (myrank==1 && size==4) {
+#pragma _NEC novector
+          for (nn=1; nn<=_nstep+1; nn++) {
+            nsta = _nstep * (1 + nn) + nn;
+            if (nn==1) {
+              nend = m - 1;
+            } else {
+              nend = m;
+            }
+            for (i=nsta; i<nend; i+=_nstep) {
+              n   = diag[i] - a->i[i];
+              idx = a->j + a->i[i];
+              v   = a->a + a->i[i];
+              sum = b[i];
+              PetscInt __i;
+              __i=0;
+              if (__i<n) {sum -= v[__i] * x[idx[__i]];__i++;}
+              if (__i<n) {sum -= v[__i] * x[idx[__i]];}
+              t[i] = sum;
+            }
+            for (i=nsta; i<nend; i+=_nstep) {
+              x[i] = t[i]*idiag[i];
+            }
+          }
+        } else {
+#pragma _NEC novector
+          for (nn=1; nn<=_nstep; nn++) {
+            nsta = _nstep * (1 + nn) + nn;
+            for (i=nsta; i<m; i+=_nstep) {
+              n   = diag[i] - a->i[i];
+              idx = a->j + a->i[i];
+              v   = a->a + a->i[i];
+              sum = b[i];
+              PetscInt __i;
+              __i=0;
+              if (__i<n) {sum -= v[__i] * x[idx[__i]];__i++;}
+              if (__i<n) {sum -= v[__i] * x[idx[__i]];}
+              t[i] = sum;
+            }
+            for (i=nsta; i<m; i+=_nstep) {
+              x[i] = t[i]*idiag[i];
+            }
+          }
+        }
+      }
+#else
       for (i=0; i<m; i++) {
         n   = diag[i] - a->i[i];
         idx = a->j + a->i[i];
@@ -2085,10 +2376,186 @@ PetscErrorCode MatSOR_SeqAIJ(Mat A,Vec bb,PetscReal omega,MatSORType flag,PetscR
         t[i] = sum;
         x[i] = sum*idiag[i];
       }
+#endif
       xb   = t;
       ierr = PetscLogFlops(a->nz);CHKERRQ(ierr);
     } else xb = b;
     if (flag & SOR_BACKWARD_SWEEP || flag & SOR_LOCAL_BACKWARD_SWEEP) {
+#ifdef __ve__
+      PetscInt _idx0bef, _nstep, nn, nsta, nend, myrank, size;
+      MPI_Comm_rank(MPI_COMM_WORLD,&myrank);
+      MPI_Comm_size(MPI_COMM_WORLD,&size);
+      _idx0bef = 999999999;
+      for (i=m-2; i>=0; i--) {
+        n   = a->i[i+1] - diag[i] - 1;
+        idx = a->j + diag[i] + 1;
+        if (idx[0] > _idx0bef) {
+          break;
+        }
+        _idx0bef = idx[0];
+      }
+      _nstep = m-1 - i - 1;
+      if (_nstep%2 == 0 && size > 4) {
+        PetscInt m2 = m+m/_nstep, _nstep2, _nshift;
+        PetscScalar x_[m2], t_[m2], xb_[m2], v_[2][m2], idiag_[m2];
+        PetscInt itrn[m2], idx_[2][m2], n_[m2], diag_[m2];
+        _nshift = m/_nstep;
+        _nstep2 = _nstep + 1;
+        for (i=m-1; i>=0; i--) {
+          itrn[i] = _nshift + i - (m-1-i)/_nstep;
+        }
+        for (i=m2-1; i>=0; i--) {
+          diag_[i] = diag[i-_nshift+(m2-1-i)/_nstep2];
+          n_[i] = a->i[i-_nshift+(m2-1-i)/_nstep2+1] - diag_[i] - 1;
+          idx_[0][i] = itrn[(a->j + diag_[i] + 1)[0]];
+          idx_[1][i] = itrn[(a->j + diag_[i] + 1)[1]];
+          v_[0][i] = (a->a + diag_[i] + 1)[0];
+          v_[1][i] = (a->a + diag_[i] + 1)[1];
+          idiag_[i] = idiag[i-_nshift+(m2-1-i)/_nstep2];
+          x_[i] = x[i-_nshift+(m2-1-i)/_nstep2];
+          t_[i] = t[i-_nshift+(m2-1-i)/_nstep2];
+          xb_[i] = xb[i-_nshift+(m2-1-i)/_nstep2];
+        }
+#pragma _NEC novector
+        for (nn=1; nn<=_nstep+1; nn++) {
+          nsta = m2 - nn - (nn-1)/_nstep;
+          nend = nsta - _nstep2 * (nn - 1);
+          if (nend<0) {
+            nend = 0;
+          }
+          for (i=nsta; i>=nend; i-=_nstep2) {
+            sum = xb_[i];
+            PetscInt __i;
+            __i=0;
+            if (__i<n_[i]) {sum -= v_[__i][i] * x_[idx_[__i][i]];__i++;}
+            if (__i<n_[i]) {sum -= v_[__i][i] * x_[idx_[__i][i]];}
+            t_[i] = sum;
+          }
+          if (xb == b) {
+            for (i=nsta; i>=nend; i-=_nstep2) {
+              x_[i] = t_[i]*idiag_[i];
+            }
+          } else {
+            for (i=nsta; i>=nend; i-=_nstep2) {
+              x_[i] = (1-omega)*x_[i] + t_[i]*idiag_[i];  /* omega in idiag */
+            }
+          }
+        }
+#pragma _NEC novector
+        for (nn=1; nn<=_nstep; nn++) {
+          nsta = m2-1 - _nstep2 * (1 + nn) - nn;
+          for (i=nsta; i>=0; i-=_nstep2) {
+            sum = xb_[i];
+            PetscInt __i;
+            __i=0;
+            if (__i<n_[i]) {sum -= v_[__i][i] * x_[idx_[__i][i]];__i++;}
+            if (__i<n_[i]) {sum -= v_[__i][i] * x_[idx_[__i][i]];}
+            t_[i] = sum;
+          }
+          nend = i + _nstep2;
+          if (xb == b) {
+            for (i=nsta; i>=nend; i-=_nstep2) {
+              x_[i] = t_[i]*idiag_[i];
+            }
+          } else {
+            for (i=nsta; i>=nend; i-=_nstep2) {
+              x_[i] = (1-omega)*x_[i] + t_[i]*idiag_[i];  /* omega in idiag */
+            }
+          }
+        }
+        for (i=0; i<m; i++) {
+          t[i] = t_[itrn[i]];
+          x[i] = x_[itrn[i]];
+        }
+      } else {
+#pragma _NEC novector
+        for (nn=1; nn<=_nstep+1; nn++) {
+          nsta = m - nn;
+          nend = nsta - _nstep * (nn - 1);
+          if (nend<0) {
+            nend = 0;
+          }
+          for (i=nsta; i>=nend; i-=_nstep) {
+            n   = a->i[i+1] - diag[i] - 1;
+            idx = a->j + diag[i] + 1;
+            v   = a->a + diag[i] + 1;
+            sum = xb[i];
+            PetscInt __i;
+            __i=0;
+            if (__i<n) {sum -= v[__i] * x[idx[__i]];__i++;}
+            if (__i<n) {sum -= v[__i] * x[idx[__i]];}
+            t[i] = sum;
+          }
+          if (xb == b) {
+            for (i=nsta; i>=nend; i-=_nstep) {
+              x[i] = t[i]*idiag[i];
+            }
+          } else {
+            for (i=nsta; i>=nend; i-=_nstep) {
+              x[i] = (1-omega)*x[i] + t[i]*idiag[i];  /* omega in idiag */
+            }
+          }
+        }
+        if (myrank==1 && size==4) {
+#pragma _NEC novector
+          for (nn=1; nn<=_nstep+1; nn++) {
+            nsta = m-1 - _nstep * (1 + nn) - nn;
+            if (nn==1) {
+              nend = 1;
+            } else {
+              nend = 0;
+            }
+            for (i=nsta; i>=nend; i-=_nstep) {
+              n   = a->i[i+1] - diag[i] - 1;
+              idx = a->j + diag[i] + 1;
+              v   = a->a + diag[i] + 1;
+              sum = xb[i];
+              PetscInt __i;
+              __i=0;
+              if (__i<n) {sum -= v[__i] * x[idx[__i]];__i++;}
+              if (__i<n) {sum -= v[__i] * x[idx[__i]];}
+              t[i] = sum;
+            }
+            nend = i + _nstep;
+            if (xb == b) {
+              for (i=nsta; i>=nend; i-=_nstep) {
+                x[i] = t[i]*idiag[i];
+              }
+            } else {
+              for (i=nsta; i>=nend; i-=_nstep) {
+                x[i] = (1-omega)*x[i] + t[i]*idiag[i];  /* omega in idiag */
+              }
+            }
+          }
+        } else {
+#pragma _NEC novector
+          for (nn=1; nn<=_nstep; nn++) {
+            nsta = m-1 - _nstep * (1 + nn) - nn;
+            for (i=nsta; i>=0; i-=_nstep) {
+              n   = a->i[i+1] - diag[i] - 1;
+              idx = a->j + diag[i] + 1;
+              v   = a->a + diag[i] + 1;
+              sum = xb[i];
+              PetscInt __i;
+              __i=0;
+              if (__i<n) {sum -= v[__i] * x[idx[__i]];__i++;}
+              if (__i<n) {sum -= v[__i] * x[idx[__i]];}
+              t[i] = sum;
+            }
+            nend = i + _nstep;
+            if (xb == b) {
+              for (i=nsta; i>=nend; i-=_nstep) {
+                x[i] = t[i]*idiag[i];
+              }
+            } else {
+              for (i=nsta; i>=nend; i-=_nstep) {
+                x[i] = (1-omega)*x[i] + t[i]*idiag[i];  /* omega in idiag */
+              }
+            }
+          }
+        }
+      }
+#else
       for (i=m-1; i>=0; i--) {
         n   = a->i[i+1] - diag[i] - 1;
         idx = a->j + diag[i] + 1;
@@ -2101,6 +2568,7 @@ PetscErrorCode MatSOR_SeqAIJ(Mat A,Vec bb,PetscReal omega,MatSORType flag,PetscR
           x[i] = (1-omega)*x[i] + sum*idiag[i];  /* omega in idiag */
         }
       }
+#endif
       ierr = PetscLogFlops(a->nz);CHKERRQ(ierr); /* assumes 1/2 in upper */
     }
     its--;
@@ -2642,6 +3110,9 @@ PetscErrorCode MatCreateSubMatrix_SeqAIJ(Mat A,IS isrow,IS iscol,PetscInt csize,
     /* special case of contiguous rows */
     ierr = PetscMalloc2(nrows,&lens,nrows,&starts);CHKERRQ(ierr);
     /* loop over new rows determining lens and starting points */
+#ifdef __ve__
+#pragma _NEC novector
+#endif
     for (i=0; i<nrows; i++) {
       kstart = ai[irow[i]];
       kend   = kstart + ailen[irow[i]];
@@ -2706,10 +3177,16 @@ PetscErrorCode MatCreateSubMatrix_SeqAIJ(Mat A,IS isrow,IS iscol,PetscInt csize,
     }
 
     /* determine lens of each row */
+#ifdef __ve__
+#pragma _NEC novector
+#endif
     for (i=0; i<nrows; i++) {
       kstart  = ai[irow[i]];
       kend    = kstart + a->ilen[irow[i]];
       lens[i] = 0;
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for (k=kstart; k<kend; k++) {
         if (smap[aj[k]]) {
           lens[i]++;
@@ -2738,6 +3215,9 @@ PetscErrorCode MatCreateSubMatrix_SeqAIJ(Mat A,IS isrow,IS iscol,PetscInt csize,
     }
     ierr = MatSeqAIJGetArrayRead(A,&aa);CHKERRQ(ierr);
     c = (Mat_SeqAIJ*)(C->data);
+#ifdef __ve__
+#pragma _NEC novector
+#endif
     for (i=0; i<nrows; i++) {
       row      = irow[i];
       kstart   = ai[row];
@@ -2746,6 +3226,9 @@ PetscErrorCode MatCreateSubMatrix_SeqAIJ(Mat A,IS isrow,IS iscol,PetscInt csize,
       mat_j    = c->j + mat_i;
       mat_a    = c->a + mat_i;
       mat_ilen = c->ilen + i;
+#ifdef __ve__
+#pragma _NEC novector
+#endif
       for (k=kstart; k<kend; k++) {
         if ((tcol=smap[a->j[k]])) {
           *mat_j++ = tcol - 1;
@@ -3016,6 +3499,9 @@ PetscErrorCode MatIncreaseOverlap_SeqAIJ(Mat A,PetscInt is_max,IS is[],PetscInt 
         row   = nidx[k];
         start = ai[row];
         end   = ai[row+1];
+#ifdef __ve__
+#pragma _NEC novector
+#endif
         for (l = start; l<end; l++) {
           val = aj[l];
           if (!PetscBTLookupSet(table,val)) nidx[isz++] = val;
@@ -5454,3 +5940,25 @@ noinsert:;
   }
   PetscFunctionReturnVoid();
 }
+
+#ifdef __ve__
+PetscErrorCode MatSetValues_IsSeqAIJ_SortedFull(Mat mat,PetscBool *flg)
+{
+  if (mat->ops->setvalues == MatSetValues_SeqAIJ_SortedFull) {
+    *flg = PETSC_TRUE;
+  } else {
+    *flg = PETSC_FALSE;
+  }
+  PetscFunctionReturn(0);
+}
+PetscErrorCode MatSetValues_IsSeqAIJ(Mat mat,PetscBool *flg)
+{
+  if (mat->ops->setvalues == MatSetValues_SeqAIJ) {
+    *flg = PETSC_TRUE;
+  } else {
+    *flg = PETSC_FALSE;
+  }
+  PetscFunctionReturn(0);
+}
+#endif
+
