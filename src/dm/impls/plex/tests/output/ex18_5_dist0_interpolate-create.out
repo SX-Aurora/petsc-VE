@@ -1,0 +1,17 @@
+DMPlexCreateFromFile produced serial mesh.
+DMPlexIsDistributed: FALSE
+DMPlexIsInterpolatedCollective: full
+DMPlexCheckPointSFHeavy PASSED
+DMPlexCheckPointSFHeavy PASSED
+DM Object: Parallel Mesh 2 MPI processes
+  type: plex
+Parallel Mesh in 2 dimensions:
+  0-cells: 6 0
+  1-cells: 7 0
+  2-cells: 2 0
+Labels:
+  celltype: 3 strata with value/size (0 (6), 4 (2), 1 (7))
+  depth: 3 strata with value/size (0 (6), 1 (7), 2 (2))
+  Cell Sets: 2 strata with value/size (1 (1), 2 (1))
+DMPlexIsDistributed: FALSE
+DMPlexIsInterpolatedCollective: full

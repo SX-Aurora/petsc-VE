@@ -1,0 +1,26 @@
+#!/bin/sh
+
+"true" '''\'
+for pyimpl in python3 python python2; do
+  which $pyimpl > /dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    exec $pyimpl "$0" "$@"
+  fi
+done
+echo "Error! Could not locate Python! Please install and have python3, python, or python2 in PATH."
+echo "Or use: /path/to/valid/python configure $@"
+exit 127
+'''
+
+import sys, os
+
+if sys.version_info < (2,7) or (sys.version_info >= (3,0) and sys.version_info < (3,4)):
+  print('************************************************************************')
+  print('*      Python version 2.7 or 3.4+ is required to run ./configure      *')
+  print('*         Try: "python3 ./configure" or "python2.7 ./configure"        *')
+  print('************************************************************************')
+  sys.exit(4)
+
+sys.path.insert(0, os.path.abspath('config'))
+import configure
+configure.petsc_configure([])
