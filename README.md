@@ -1,4 +1,4 @@
-# petsc-VE: PETSc numerical library package for SX-Aurora TSUBASA Vector Engine.
+# petsc-VE
 
 PETSc (https://github.com/petsc/petsc) optimized version for SX-Aurora TSUBASA Vector Engine base on petsc-3.16.4.
 
@@ -20,5 +20,3 @@ After that, run the executable.
 ```
 ./go.sh
 ```
-
-> PETSc numerical library package for SX-Aurora TSUBASA Vector Engine.
